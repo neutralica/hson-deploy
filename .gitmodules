@@ -1,6 +1,6 @@
-[submodule "Intrastructure"]
-	path = Intrastructure
-	url = https://github.com/neutralica/Intrastructure.git
+[submodule "intrastructure"]
+	path = intrastructure
+	url = https://github.com/neutralica/intrastructure.git
 [submodule "hson-live"]
 	path = hson-live
 	url = https://github.com/neutralica/hson-live.git
