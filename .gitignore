@@ -1,7 +1,11 @@
+cat > .gitignore <<'EOF'
 node_modules/
 **/node_modules/
+dist/
 **/dist/
+.vite/
 **/.vite/
+.wrangler/
 **/.wrangler/
-**/*.tsbuildinfo
-.DS_Store
+*.tsbuildinfo
+EOF
