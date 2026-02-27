@@ -2,9 +2,9 @@
   "name": "terminal-gothic-deploy",
   "private": true,
   "workspaces": [
-    "packages/intrastructure",
-    "packages/hson-live",
-    "packages/hson-demo2"
+    "intrastructure",
+    "hson-live",
+    "hson-demo2"
   ],
   "scripts": {
     "build": "npm -w intrastructure run build && npm -w hson-live run build && npm -w hson-demo2 run build",
