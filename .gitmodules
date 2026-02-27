@@ -1,0 +1,9 @@
+[submodule "Intrastructure"]
+	path = Intrastructure
+	url = https://github.com/neutralica/Intrastructure.git
+[submodule "hson-live"]
+	path = hson-live
+	url = https://github.com/neutralica/hson-live.git
+[submodule "hson-demo2"]
+	path = hson-demo2
+	url = https://github.com/neutralica/hson-demo2.git
