@@ -9,3 +9,8 @@ dist/
 **/.wrangler/
 *.tsbuildinfo
 EOF
+
+# deps
+node_modules/
+dist/
+.vite/
