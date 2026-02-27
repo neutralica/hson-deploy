@@ -1,9 +1,14 @@
 [submodule "intrastructure"]
 	path = intrastructure
 	url = https://github.com/neutralica/intrastructure.git
+	branch = main
+
 [submodule "hson-live"]
 	path = hson-live
 	url = https://github.com/neutralica/hson-live.git
+	branch = main
+
 [submodule "hson-demo2"]
 	path = hson-demo2
 	url = https://github.com/neutralica/hson-demo2.git
+	branch = main
