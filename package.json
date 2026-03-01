@@ -8,13 +8,10 @@
     "hson-demo2"
   ],
   "scripts": {
-    "build": "npm -w intrastructure run build && npm -w hson-live run build && npm -w hson-demo2 run build",
-    "dev": "npm -w hson-demo2 run dev",
-    "preview": "npm -w hson-demo2 run preview",
-    "bump": "git submodule update --remote --merge && git add hson-demo2 hson-live intrastructure && git diff --cached --quiet || git commit -m \"Bump submodules\"",
-    "push": "git push",
-    "deploy": "npm run bump && npm run push"
-
-
-  }
+  "build": "npm -w intrastructure run build && npm -w hson-live run build && npm -w hson-demo2 run build",
+  "dev": "npm -w hson-demo2 run dev",
+  "preview": "npm -w hson-demo2 run preview",
+ "bump": "git submodule update --remote --merge && git add -A && git diff --cached --quiet || git commit -m \"Bump submodules\"",   "push": "git push",
+  "deploy": "npm run bump && npm run push"
+}
 }
