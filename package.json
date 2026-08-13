@@ -11,9 +11,12 @@
     "build": "npm -w intrastructure run build && npm -w hson-live run build && npm -w hson-demo2 run build",
     "dev": "npm -w hson-demo2 run dev",
     "preview": "npm -w hson-demo2 run preview",
+
+    "deploy:worker": "npm -w hson-demo2 run deploy:worker",
+
     "bump": "git submodule update --remote --merge && git add -A && git diff --cached --quiet || git commit -m \"Bump submodules\"",
     "push": "git push",
-      "deploy": "npm run deploy:worker && npm run bump && npm run push"
 
+    "deploy": "npm run deploy:worker && npm run bump && npm run push"
   }
 }
