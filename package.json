@@ -13,6 +13,7 @@
     "preview": "npm -w hson-demo2 run preview",
     "bump": "git submodule update --remote --merge && git add -A && git diff --cached --quiet || git commit -m \"Bump submodules\"",
     "push": "git push",
-    "deploy": "npm run bump && npm run push"
+      "deploy": "npm run deploy:worker && npm run bump && npm run push"
+
   }
 }
