@@ -10,6 +10,7 @@ import { make_remote_hosted_test_runtime } from "../hson-demo2/src/app/demos/tes
 import { hosted_test_projection_summary } from "../hson-demo2/src/app/demos/tests/panel/hosted-test-report-summary";
 import type { HostedTestReport } from "../hson-demo2/src/shared/hosted-tests/hosted-test-report.types";
 import type { TestExecutorDiscovery } from "../hson-demo2/src/shared/testing/test-discovery-contract";
+import type { HostedTestTimelineEvent } from "../hson-demo2/src/shared/hosted-tests/hosted-test-timeline";
 import { start_hosted_test_server } from "../hson-demo2/tests/harness/runtimes/node/server/hosted-test-server";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -17,6 +18,7 @@ const DEMO = join(ROOT, "hson-demo2");
 type Name = "semantic" | "browser" | "certification";
 type Selection = Readonly<{ name: Name; ids: readonly string[] }>;
 export type DeploymentCaptureOptions = Readonly<{ stages?: readonly Name[] }>;
+type EvidenceClassification = Readonly<{ selfContained: number; transientIrrelevant: number; transientRequired: number }>;
 
 function git(args: readonly string[], cwd = ROOT): string { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function state() {
@@ -30,7 +32,7 @@ function state() {
   }
   return Object.freeze({ hsonDeployCommit: git(["rev-parse", "HEAD"]), hsonDemo2Gitlink: links["hson-demo2"], hsonLiveGitlink: links["hson-live"], intrastructureGitlink: links.intrastructure });
 }
-function unique(ids: readonly string[], name: string) { if (new Set(ids).size !== ids.length) throw new Error(`DEPLOYMENT_CAPTURE_DUPLICATE:${name}`); return Object.freeze([...ids]); }
+function unique<T extends string>(ids: readonly T[], name: string) { if (new Set(ids).size !== ids.length) throw new Error(`DEPLOYMENT_CAPTURE_DUPLICATE:${name}`); return Object.freeze([...ids]); }
 export function derive_selections(discovery: TestExecutorDiscovery): readonly Selection[] {
   const suites = new Map(discovery.catalog.suites.map((suite) => [suite.id, suite]));
   if (suites.size !== discovery.catalog.suites.length) throw new Error("DEPLOYMENT_CAPTURE_DUPLICATE_SUITE");
@@ -44,33 +46,78 @@ export function derive_selections(discovery: TestExecutorDiscovery): readonly Se
   return Object.freeze([Object.freeze({ name: "semantic" as const, ids: unique(semantic, "semantic") }), Object.freeze({ name: "browser" as const, ids: unique(browser, "browser") }), Object.freeze({ name: "certification" as const, ids: unique(certification, "certification") })]);
 }
 async function atomic(path: string, value: unknown) { const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`); const temp = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`); await writeFile(temp, bytes, { flag: "wx" }); JSON.parse(await readFile(temp, "utf8")); await rename(temp, path); return bytes.byteLength; }
-function sink(): HostedTestPanelSink { return Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } }); }
+async function revalidate(path: string): Promise<HostedTestReport> { return JSON.parse(await readFile(path, "utf8")) as HostedTestReport; }
+function evidence_classification(report: HostedTestReport): EvidenceClassification {
+  const evidence = report.suiteRuns.flatMap((suite) => suite.evidence);
+  const referenced = new Set(report.suiteRuns.flatMap((suite) => [
+    ...suite.evidenceRefs,
+    ...suite.cases.flatMap((test) => test.evidenceRefs),
+  ]));
+  const ids = new Set(evidence.map((entry) => entry.id));
+  assert.equal(ids.size, evidence.length, "report evidence IDs must be unique");
+  for (const id of referenced) assert.ok(ids.has(id), `report evidence reference is missing: ${id}`);
+  const classification = evidence.reduce((counts, entry) => {
+    if (entry.content.length > 0 || entry.reference === null) return { ...counts, selfContained: counts.selfContained + 1 };
+    if (referenced.has(entry.id)) return { ...counts, transientRequired: counts.transientRequired + 1 };
+    return { ...counts, transientIrrelevant: counts.transientIrrelevant + 1 };
+  }, { selfContained: 0, transientIrrelevant: 0, transientRequired: 0 });
+  assert.equal(classification.transientRequired, 0, "DEPLOYMENT_CAPTURE_TRANSIENT_REQUIRED_EVIDENCE");
+  return Object.freeze(classification);
+}
 function validate(name: Name, intended: readonly string[], report: HostedTestReport, result: any) {
   assert.equal(report.run.status, "passed"); assert.equal(result.ok, true); assert.equal(result.runId, report.run.id); assert.ok(result.reportHostId); assert.ok(result.reportRev !== undefined); assert.deepEqual([...report.plan.selectionIds].sort(), [...intended].sort());
+  assert.deepEqual([...result.selectionIds].sort(), [...intended].sort());
   assert.equal(report.summary.fail, 0); assert.equal(report.summary.skip, 0); assert.equal(report.suiteRuns.every((suite) => suite.status === "pass"), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(report)), report, "report must be JSON-safe without lossy fields");
   const summary = hosted_test_projection_summary(report);
   if (name === "semantic") { assert.equal(summary.canonical.pass, summary.canonical.total); assert.equal(summary.launchers.passedChecks, summary.launchers.declaredChecks); assert.equal(report.suiteRuns.filter((suite) => suite.executionShape === "cases").every((suite) => suite.cases.every((test) => test.diagnostic !== null)), true); }
-  if (name === "browser") assert.equal(summary.browser.pass, intended.length);
+  if (name === "browser") {
+    const browserCases = report.suiteRuns.flatMap((suite) => suite.cases);
+    assert.equal(report.suiteRuns.every((suite) => suite.executionShape === "browser-journeys"), true, "browser capture contains a non-browser suite");
+    assert.equal(browserCases.length, intended.length, "every browser journey must have one report case");
+    assert.deepEqual(browserCases.map((test) => test.id).sort(), [...intended].sort(), "browser journey report identity must exactly match selection");
+    assert.equal(summary.browser.pass, intended.length);
+  }
   if (name === "certification") assert.equal(summary.certifications.pass, intended.length);
+}
+function stage_name(event: HostedTestTimelineEvent): string | undefined {
+  const names: Partial<Record<HostedTestTimelineEvent["stage"], string>> = {
+    coordinator_association_committed: "association",
+    browser_received_first_report_frame: "report-attach",
+    report_client_ready: "ready",
+    first_suite_or_case_started: "browser-execution-start",
+    report_terminal_committed: "browser-execution-terminal",
+    run_finished: "report-settle",
+    panel_run_completed: "action-acknowledgment",
+  };
+  return names[event.stage];
+}
+export function parse_capture_stages(arguments_: readonly string[]): readonly Name[] | undefined {
+  if (arguments_.length === 0) return undefined;
+  const aliases: Readonly<Record<string, Name>> = Object.freeze({ "--semantic-only": "semantic", "--browser-only": "browser", "--certification-only": "certification" });
+  const stages = arguments_.map((argument) => aliases[argument] ?? (argument.startsWith("--stage=") ? argument.slice("--stage=".length) : argument)) as Name[];
+  unique(stages, "requested-stages");
+  if (stages.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
+  return Object.freeze(stages);
 }
 export async function capture_deployment_tests(options: DeploymentCaptureOptions = {}) {
   const requestedStages = options.stages === undefined ? undefined : unique(options.stages, "requested-stages");
   if (requestedStages?.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) {
     throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
   }
-  const before = state(); const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); let stage = "server-start"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined;
+  const before = state(); const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); let stage = "server-start"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; let cleanup: Record<string, unknown> | undefined;
   try {
     process.chdir(DEMO); server = await start_hosted_test_server({ host: "127.0.0.1", port: 0, shutdownTimeoutMs: 15_000, retainRichDiagnostics: true, authorityLifecycle: { maxTowlRooms: 8, towlIdleMs: 30_000, maxHostedReports: 8, hostedReportRetentionMs: 3_600_000, sweepIntervalMs: 30_000 } });
-    stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20] }); adapter = make_hosted_test_panel_adapter(runtime, sink()); await runtime.ready(); stage = "selection-derivation"; const selections = derive_selections(await runtime.discover()); const runs: Record<string, unknown> = {};
-    for (const selection of selections) { if (requestedStages && !requestedStages.includes(selection.name)) continue; stage = `${selection.name}:tests.runSelected`; const result = await adapter.start_selected(selection.ids); stage = `${selection.name}:capture-validation`; const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selection.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; validate(selection.name, selection.ids, snapshot, result); stage = `${selection.name}:atomic-write`; const reportFile = `${selection.name}.json`; const rawBytes = await atomic(join(capture, reportFile), snapshot); runs[selection.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, reportFile, selectionCount: selection.ids.length, terminalStatus: snapshot.run.status, rawBytes }; }
-    await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selection) => selection.name), runs }); return candidate;
+    stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: (event) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); } }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); const runs: Record<string, unknown> = {};
+    for (const selection of selections) { if (requestedStages && !requestedStages.includes(selection.name)) continue; stage = `${selection.name}:association`; const result = await adapter.start_selected(selection.ids); stage = `${selection.name}:validation`; const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selection.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; validate(selection.name, selection.ids, snapshot, result); const evidence = evidence_classification(snapshot); stage = `${selection.name}:atomic-write`; const reportFile = `${selection.name}.json`; const reportPath = join(capture, reportFile); const rawBytes = await atomic(reportPath, snapshot); const revalidated = await revalidate(reportPath); assert.deepEqual(revalidated, snapshot, "atomically written report must independently revalidate"); runs[selection.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, reportFile, selectionCount: selection.ids.length, journeyCount: selection.name === "browser" ? snapshot.suiteRuns.flatMap((suite) => suite.cases).length : undefined, terminalStatus: snapshot.run.status, rawBytes, evidence }; }
+    stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selection) => selection.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection: Object.fromEntries(selections.map((selection) => [selection.name, { idCount: selection.ids.length, ids: selection.ids }])), observedStages, timeline, runs }); return candidate;
   } catch (error) {
     const cause = error instanceof Error ? error : new Error(String(error));
-    await atomic(join(candidate, "capture-diagnostics.json"), { failedStage: stage, error: { name: cause.name, message: cause.message, stack: cause.stack } });
+    await atomic(join(candidate, "capture-diagnostics.json"), { failedStage: stage, observedStages, timeline, error: { name: cause.name, message: cause.message, stack: cause.stack } });
     throw error;
-  } finally { adapter?.dispose(); runtime?.dispose(); if (server) { await server.stop(); const browser = server.browserMetrics?.(); if (browser) { assert.equal(browser.activeProcesses, 0); assert.equal(browser.activeJourneys, 0); } } process.chdir(cwd); assert.deepEqual(state(), before); }
+  } finally { stage = "cleanup"; adapter?.dispose(); runtime?.dispose(); if (server) { const preStopConnections = server.connectionSnapshot(); await server.stop(); const browser = server.browserMetrics?.(); if (browser) { assert.equal(browser.activeProcesses, 0); assert.equal(browser.activeJourneys, 0); assert.equal(browser.retainedArtifactRoots, 0); } cleanup = { preStopConnections, browser }; } process.chdir(cwd); assert.deepEqual(state(), before); if (cleanup !== undefined) await atomic(join(capture, "capture-cleanup.json"), cleanup); }
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const stages = process.argv.slice(2).map((argument) => argument === "--semantic-only" ? "semantic" : argument.replace(/^--stage=/, "")) as Name[];
+  const stages = parse_capture_stages(process.argv.slice(2));
   capture_deployment_tests(stages.length === 0 ? {} : { stages }).then((candidate) => console.log(candidate));
 }
