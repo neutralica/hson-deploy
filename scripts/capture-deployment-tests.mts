@@ -16,6 +16,7 @@ const ROOT = resolve(import.meta.dirname, "..");
 const DEMO = join(ROOT, "hson-demo2");
 type Name = "semantic" | "browser" | "certification";
 type Selection = Readonly<{ name: Name; ids: readonly string[] }>;
+export type DeploymentCaptureOptions = Readonly<{ stages?: readonly Name[] }>;
 
 function git(args: readonly string[], cwd = ROOT): string { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function state() {
@@ -52,13 +53,20 @@ function validate(name: Name, intended: readonly string[], report: HostedTestRep
   if (name === "browser") assert.equal(summary.browser.pass, intended.length);
   if (name === "certification") assert.equal(summary.certifications.pass, intended.length);
 }
-export async function capture_deployment_tests() {
+export async function capture_deployment_tests(options: DeploymentCaptureOptions = {}) {
+  const requestedStages = options.stages === undefined ? undefined : unique(options.stages, "requested-stages");
+  if (requestedStages?.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) {
+    throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
+  }
   const before = state(); const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined;
   try {
     process.chdir(DEMO); server = await start_hosted_test_server({ host: "127.0.0.1", port: 0, shutdownTimeoutMs: 15_000, retainRichDiagnostics: true, authorityLifecycle: { maxTowlRooms: 8, towlIdleMs: 30_000, maxHostedReports: 8, hostedReportRetentionMs: 3_600_000, sweepIntervalMs: 30_000 } });
     runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20] }); adapter = make_hosted_test_panel_adapter(runtime, sink()); await runtime.ready(); const selections = derive_selections(await runtime.discover()); const runs: Record<string, unknown> = {};
-    for (const selection of selections) { const result = await adapter.start_selected(selection.ids); const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selection.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; validate(selection.name, selection.ids, snapshot, result); const reportFile = `${selection.name}.json`; const rawBytes = await atomic(join(capture, reportFile), snapshot); runs[selection.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, reportFile, selectionCount: selection.ids.length, terminalStatus: snapshot.run.status, rawBytes }; }
-    await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, runs }); return candidate;
+    for (const selection of selections) { if (requestedStages && !requestedStages.includes(selection.name)) continue; const result = await adapter.start_selected(selection.ids); const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selection.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; validate(selection.name, selection.ids, snapshot, result); const reportFile = `${selection.name}.json`; const rawBytes = await atomic(join(capture, reportFile), snapshot); runs[selection.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, reportFile, selectionCount: selection.ids.length, terminalStatus: snapshot.run.status, rawBytes }; }
+    await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selection) => selection.name), runs }); return candidate;
   } finally { adapter?.dispose(); runtime?.dispose(); if (server) { await server.stop(); const browser = server.browserMetrics?.(); if (browser) { assert.equal(browser.activeProcesses, 0); assert.equal(browser.activeJourneys, 0); } } process.chdir(cwd); assert.deepEqual(state(), before); }
 }
-if (import.meta.url === `file://${process.argv[1]}`) capture_deployment_tests().then((candidate) => console.log(candidate));
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const stages = process.argv.slice(2).map((argument) => argument === "--semantic-only" ? "semantic" : argument.replace(/^--stage=/, "")) as Name[];
+  capture_deployment_tests(stages.length === 0 ? {} : { stages }).then((candidate) => console.log(candidate));
+}
