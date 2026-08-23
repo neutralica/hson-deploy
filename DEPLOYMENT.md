@@ -1,4 +1,27 @@
-# Worker deployment workflow
+# Hosted authority deployment workflow
+
+## Node hosted authority (default)
+
+The ordinary hosted authority is the persistent Node service, not the Worker.
+`npm run prepare:node-production` performs the repository-side preparation
+only:
+
+```text
+verify → build Node artifacts → checks → Node production preflight
+```
+
+It does not deploy, start, publish, update a release pointer, or contact an
+external provider. It requires clean gitlink-pinned workspace checkouts and
+valid production `LOCUS_ALLOWED_ORIGINS` and `LOCUS_BEARER_TOKEN` values. The
+preflight verifies both Node artifacts, sibling `hson-live` resolution (root,
+Locus, Locus Node, and Node LiveHost), and required runtime packages.
+
+The eventual provider runs `npm -w hson-demo2 run start:production` from this
+prepared workspace. See [`hson-demo2/DEPLOYMENT.md`](./hson-demo2/DEPLOYMENT.md)
+for the exact runtime boundary, environment contract, `/healthz` readiness
+endpoint, and provider-neutral TLS/WebSocket/process-supervision requirements.
+
+## Worker compatibility deployment
 
 `npm run deploy:worker` deploys only the Cloudflare Worker and Durable Object
 adapter in `hson-demo2`. It does not publish a static Vite build, deploy the
