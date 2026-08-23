@@ -21,6 +21,7 @@
     "verify:static-production-artifact": "node scripts/verify-static-production-artifact.mjs",
     "test:preflight:cloudflare": "node --test scripts/preflight-cloudflare.test.mjs",
     "verify:submodules": "node scripts/verify-submodules.mjs",
+    "capture:deployment-tests": "./node_modules/.bin/tsx scripts/capture-deployment-tests.mts",
     "verify": "npm run verify:runtime && npm run verify:workspace && npm run verify:submodules",
     "build": "npm -w intrastructure run build && npm -w hson-live run build && npm -w hson-demo2 run build",
     "check": "npm -w hson-live run check && npm -w hson-live run check:entrypoints && npm run verify:package-surface && npm -w hson-demo2 run check && npm -w hson-demo2 run check:cloudflare",
