@@ -20,9 +20,10 @@ surface check requires the root, types, LiveTree, LiveMap, Locus (including
 Node), and LiveHost (including Node) exports to have built artifacts.
 
 Use Node `>=22.12.0 <25` and npm `>=10 <12`; the deployment scripts reject
-other versions before build or deployment. `CLOUDFLARE_API_TOKEN` must be set
-only when actually running a Worker deployment; local verification does not
-read Cloudflare or require credentials.
+other versions before build or deployment. Worker deployment requires either a
+`CLOUDFLARE_API_TOKEN` (for CI) or an authenticated local Wrangler session
+(`wrangler login`). Local verification does not read Cloudflare or require
+credentials.
 
 `sync:demo2` and `push` remain explicit Git maintenance commands. They are not
 part of the Worker deployment command, so no release Git state advances before
