@@ -14,3 +14,4 @@ EOF
 node_modules/
 dist/
 .vite/
+static-production/

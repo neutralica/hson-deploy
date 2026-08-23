@@ -30,8 +30,9 @@ Build it with the public Node WebSocket service origin:
 VITE_HOSTED_TEST_WS_URL=wss://<node-service-host> npm run prepare:static-production
 ```
 
-This command validates the public client configuration, builds the existing Vite
-artifact, and confirms that the configured endpoint is embedded. It does not
+This command validates the public client configuration, builds a deployment-owned
+Vite artifact in `static-production/`, and confirms that the configured endpoint
+is embedded. The `hson-demo2` submodule remains source-only and clean. It does not
 deploy or publish the artifact. `VITE_TOWL_WS_URL` and
 `VITE_CIRCUIT_VERIFICATION_WS_URL` are optional explicit overrides; when they
 are absent, those clients use the hosted endpoint and derive `/towl` and

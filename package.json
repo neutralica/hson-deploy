@@ -26,7 +26,7 @@
     "check": "npm -w hson-live run check && npm -w hson-live run check:entrypoints && npm run verify:package-surface && npm -w hson-demo2 run check && npm -w hson-demo2 run check:cloudflare",
     "preflight:worker": "npm run verify && npm run build && npm run check",
     "prepare:node-production": "npm run verify && npm -w hson-demo2 run build:node-production && npm run check && npm run preflight:node-production",
-    "prepare:static-production": "npm run verify && npm run preflight:static-production && npm -w hson-demo2 run build && npm run verify:static-production-artifact",
+    "prepare:static-production": "npm run verify && npm run preflight:static-production && npm -w hson-demo2 run build -- --outDir ../static-production --emptyOutDir && npm run verify:static-production-artifact",
     "dev": "npm -w hson-demo2 run dev",
     "preview": "npm -w hson-demo2 run preview",
     "submodule:update": "node scripts/update-submodule.mjs",
