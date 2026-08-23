@@ -15,6 +15,12 @@ const targets = {
   live: "hson-live",
 };
 
+const syncTargets = [
+  { name: "hson-live", canonicalPath: path.resolve(deployRoot, "..", "hson-live") },
+  { name: "hson-demo2", canonicalPath: path.resolve(deployRoot, "..", "hson-demo2") },
+  { name: "intrastructure" },
+];
+
 function fail(message) {
   throw new Error(message);
 }
@@ -177,6 +183,148 @@ function parentGitlink(repoName) {
   }
 
   return fields[2];
+}
+
+function originUrls(repoPath) {
+  return {
+    fetch: git(repoPath, ["remote", "get-url", "origin"], true),
+    push: git(repoPath, ["remote", "get-url", "--push", "origin"], true),
+  };
+}
+
+function configuredSubmoduleUrl(repoName) {
+  return git(
+    deployRoot,
+    ["config", "--file", ".gitmodules", "--get", `submodule.${repoName}.url`],
+    true,
+  );
+}
+
+function assertPublishedMain(repoPath, label) {
+  fetchMain(repoPath);
+
+  const relationship = revisionRelationship(repoPath);
+
+  if (relationship.ahead !== 0 || relationship.behind !== 0) {
+    fail(
+      `${label} HEAD must equal its published origin/main.\n` +
+        `Ahead: ${relationship.ahead}; behind: ${relationship.behind}`,
+    );
+  }
+}
+
+function assertClean(repoPath, label) {
+  const currentStatus = status(repoPath);
+
+  if (currentStatus) {
+    fail(`${label} must be clean:\n\n${currentStatus}`);
+  }
+}
+
+function assertMatchingOrigin(repoPath, expectedUrl, label) {
+  const actual = originUrls(repoPath);
+
+  if (actual.fetch !== expectedUrl || actual.push !== expectedUrl) {
+    fail(
+      `${label} origin remote does not match the canonical submodule remote.\n` +
+        `Expected: ${expectedUrl}\n` +
+        `Fetch:    ${actual.fetch}\n` +
+        `Push:     ${actual.push}`,
+    );
+  }
+}
+
+function synchronizePublishedSubmodules() {
+  assertRepository(deployRoot, "hson-deploy");
+  assertMainUpstream(deployRoot, "hson-deploy");
+  assertClean(deployRoot, "hson-deploy");
+  assertPublishedMain(deployRoot, "hson-deploy");
+
+  const plans = [];
+
+  for (const target of syncTargets) {
+    const deploymentPath = path.join(deployRoot, target.name);
+    const expectedRemote = configuredSubmoduleUrl(target.name);
+
+    assertRepository(deploymentPath, `deployment ${target.name}`);
+    assertClean(deploymentPath, `deployment ${target.name}`);
+    assertMatchingOrigin(deploymentPath, expectedRemote, `deployment ${target.name}`);
+
+    if (target.canonicalPath) {
+      assertRepository(target.canonicalPath, `canonical ${target.name}`);
+      assertClean(target.canonicalPath, `canonical ${target.name}`);
+      assertMainUpstream(target.canonicalPath, `canonical ${target.name}`);
+      assertMatchingOrigin(target.canonicalPath, expectedRemote, `canonical ${target.name}`);
+      assertPublishedMain(target.canonicalPath, `canonical ${target.name}`);
+    }
+
+    const recordedGitlink = parentGitlink(target.name);
+    const deploymentHead = git(deploymentPath, ["rev-parse", "HEAD"], true);
+
+    if (recordedGitlink !== deploymentHead) {
+      fail(
+        `Deployment ${target.name} HEAD already differs from the parent gitlink.\n` +
+          `Parent:    ${recordedGitlink}\n` +
+          `Submodule: ${deploymentHead}\n` +
+          "Refusing to replace an unexplained gitlink change.",
+      );
+    }
+
+    fetchMain(deploymentPath);
+    const relationship = revisionRelationship(deploymentPath);
+
+    if (relationship.ahead !== 0) {
+      fail(
+        `Deployment ${target.name} has ${relationship.ahead} unpublished local commit(s).\n` +
+          "Refusing to discard or replace local history.",
+      );
+    }
+
+    plans.push({
+      deploymentPath,
+      name: target.name,
+      behind: relationship.behind,
+      publishedCommit: git(deploymentPath, ["rev-parse", "origin/main"], true),
+    });
+  }
+
+  const changedGitlinks = [];
+
+  for (const plan of plans) {
+    if (plan.behind === 0) {
+      console.log(`${plan.name}: already pinned to published origin/main.`);
+      continue;
+    }
+
+    console.log(`${plan.name}: advancing ${plan.behind} commit(s) to ${plan.publishedCommit}.`);
+    git(plan.deploymentPath, ["switch", "--detach", plan.publishedCommit]);
+    assertClean(plan.deploymentPath, `deployment ${plan.name}`);
+    changedGitlinks.push(plan.name);
+  }
+
+  for (const repoName of changedGitlinks) {
+    git(deployRoot, ["add", "--", repoName]);
+  }
+
+  const staged = stagedFiles(deployRoot);
+
+  if (
+    staged.length !== changedGitlinks.length ||
+    staged.some((file) => !changedGitlinks.includes(file))
+  ) {
+    fail(
+      "Unexpected parent files became staged:\n\n" +
+        (staged.length > 0 ? staged.map((file) => `  ${file}`).join("\n") : "  (none)"),
+    );
+  }
+
+  console.log("\nSubmodule sync complete.");
+  if (changedGitlinks.length === 0) {
+    console.log("All deployment gitlinks already match published origin/main.");
+  } else {
+    console.log(`Staged parent gitlinks: ${changedGitlinks.join(", ")}`);
+  }
+  console.log("The hson-deploy repository was NOT committed or pushed.");
 }
 
 async function confirm(question) {
@@ -363,6 +511,16 @@ function updateDeploymentSubmodule(
 
 async function main() {
   const [targetName, ...messageParts] = process.argv.slice(2);
+
+  if (targetName === "sync") {
+    if (messageParts.length > 0) {
+      fail("Usage:\n  npm run submodules:sync");
+    }
+
+    synchronizePublishedSubmodules();
+    return;
+  }
+
   const commitMessage = messageParts.join(" ").trim();
 
   if (!targetName || !targets[targetName]) {
@@ -482,6 +640,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`\nsubmodule:update: ${error.message}\n`);
+  const command = process.argv[2] === "sync" ? "submodules:sync" : "submodule:update";
+  console.error(`\n${command}: ${error.message}\n`);
   process.exitCode = 1;
 });

@@ -27,9 +27,11 @@
     "preflight:worker": "npm run verify && npm run build && npm run check",
     "prepare:node-production": "npm run verify && npm -w hson-demo2 run build:node-production && npm run check && npm run preflight:node-production",
     "prepare:static-production": "npm run verify && npm run preflight:static-production && npm -w hson-demo2 run build -- --outDir ../static-production --emptyOutDir && npm run verify:static-production-artifact",
+    "prepare:static-local": "VITE_HOSTED_TEST_WS_URL=ws://127.0.0.1:4191 npm run prepare:static-production",
     "dev": "npm -w hson-demo2 run dev",
     "preview": "npm -w hson-demo2 run preview",
     "submodule:update": "node scripts/update-submodule.mjs",
+    "submodules:sync": "node scripts/update-submodule.mjs sync",
     "verify:demo2": "test \"$(git -C hson-demo2 rev-parse HEAD)\" = \"$(git -C hson-demo2 rev-parse origin/main)\" && test \"$(git ls-tree HEAD hson-demo2 | awk '{print $3}')\" = \"$(git -C hson-demo2 rev-parse HEAD)\"",
     "push": "git push",
     "deploy:worker": "npm run preflight:worker && node scripts/preflight-cloudflare.mjs && npm -w hson-demo2 run cloudflare:deploy"
