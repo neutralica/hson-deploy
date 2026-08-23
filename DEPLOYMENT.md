@@ -21,6 +21,27 @@ prepared workspace. See [`hson-demo2/DEPLOYMENT.md`](./hson-demo2/DEPLOYMENT.md)
 for the exact runtime boundary, environment contract, `/healthz` readiness
 endpoint, and provider-neutral TLS/WebSocket/process-supervision requirements.
 
+## Static frontend (Node authority)
+
+The ordinary production frontend is a separately published static Vite artifact.
+Build it with the public Node WebSocket service origin:
+
+```sh
+VITE_HOSTED_TEST_WS_URL=wss://<node-service-host> npm run prepare:static-production
+```
+
+This command validates the public client configuration, builds the existing Vite
+artifact, and confirms that the configured endpoint is embedded. It does not
+deploy or publish the artifact. `VITE_TOWL_WS_URL` and
+`VITE_CIRCUIT_VERIFICATION_WS_URL` are optional explicit overrides; when they
+are absent, those clients use the hosted endpoint and derive `/towl` and
+`/circuit-verification` respectively. Hosted tests derive `/hosted-tests`.
+
+`VITE_*` values are browser-visible. Never place `LOCUS_BEARER_TOKEN`, a bearer
+token, or any other credential in a Vite variable. Browser authentication uses
+the externally provisioned HttpOnly `locus_auth` cookie (or the configured
+`LOCUS_AUTH_COOKIE_NAME`) at the proxy/identity boundary.
+
 ## Worker compatibility deployment
 
 `npm run deploy:worker` deploys only the Cloudflare Worker and Durable Object

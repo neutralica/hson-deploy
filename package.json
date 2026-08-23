@@ -17,6 +17,8 @@
     "verify:workspace": "node scripts/verify-workspace.mjs",
     "verify:package-surface": "node scripts/verify-package-surface.mjs",
     "preflight:node-production": "npm run verify:runtime && node scripts/preflight-node-production.mjs",
+    "preflight:static-production": "npm run verify:runtime && node scripts/preflight-static-production.mjs",
+    "verify:static-production-artifact": "node scripts/verify-static-production-artifact.mjs",
     "test:preflight:cloudflare": "node --test scripts/preflight-cloudflare.test.mjs",
     "verify:submodules": "node scripts/verify-submodules.mjs",
     "verify": "npm run verify:runtime && npm run verify:workspace && npm run verify:submodules",
@@ -24,13 +26,12 @@
     "check": "npm -w hson-live run check && npm -w hson-live run check:entrypoints && npm run verify:package-surface && npm -w hson-demo2 run check && npm -w hson-demo2 run check:cloudflare",
     "preflight:worker": "npm run verify && npm run build && npm run check",
     "prepare:node-production": "npm run verify && npm -w hson-demo2 run build:node-production && npm run check && npm run preflight:node-production",
+    "prepare:static-production": "npm run verify && npm run preflight:static-production && npm -w hson-demo2 run build && npm run verify:static-production-artifact",
     "dev": "npm -w hson-demo2 run dev",
     "preview": "npm -w hson-demo2 run preview",
-    "sync:demo2": "git -C hson-demo2 fetch origin && git -C hson-demo2 switch main && git -C hson-demo2 merge --ff-only origin/main && git add hson-demo2 && (git diff --cached --quiet -- hson-demo2 || git commit -m \"Bump hson-demo2\" -- hson-demo2)",
+    "submodule:update": "node scripts/update-submodule.mjs",
     "verify:demo2": "test \"$(git -C hson-demo2 rev-parse HEAD)\" = \"$(git -C hson-demo2 rev-parse origin/main)\" && test \"$(git ls-tree HEAD hson-demo2 | awk '{print $3}')\" = \"$(git -C hson-demo2 rev-parse HEAD)\"",
     "push": "git push",
-    
     "deploy:worker": "npm run preflight:worker && node scripts/preflight-cloudflare.mjs && npm -w hson-demo2 run cloudflare:deploy"
   }
-
 }
