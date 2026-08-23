@@ -16,7 +16,8 @@
     "verify:runtime": "node scripts/verify-runtime.mjs",
     "verify:workspace": "node scripts/verify-workspace.mjs",
     "verify:package-surface": "node scripts/verify-package-surface.mjs",
-    "verify": "npm run verify:runtime && npm run verify:workspace",
+    "verify:submodules": "node scripts/verify-submodules.mjs",
+    "verify": "npm run verify:runtime && npm run verify:workspace && npm run verify:submodules",
     "build": "npm -w intrastructure run build && npm -w hson-live run build && npm -w hson-demo2 run build",
     "check": "npm -w hson-live run check && npm -w hson-live run check:entrypoints && npm run verify:package-surface && npm -w hson-demo2 run check && npm -w hson-demo2 run check:cloudflare",
     "preflight:worker": "npm run verify && npm run build && npm run check",
@@ -27,4 +28,5 @@
     "verify:demo2": "test \"$(git -C hson-demo2 rev-parse HEAD)\" = \"$(git -C hson-demo2 rev-parse origin/main)\" && test \"$(git ls-tree HEAD hson-demo2 | awk '{print $3}')\" = \"$(git -C hson-demo2 rev-parse HEAD)\"",
     "push": "git push"
   }
+
 }
