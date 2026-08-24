@@ -173,5 +173,5 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
   const stages = parse_capture_stages(process.argv.slice(2));
-  capture_deployment_tests(stages.length === 0 ? {} : { stages }).then((candidate) => console.log(candidate));
+  capture_deployment_tests(stages === undefined ? {} : { stages }).then((candidate) => console.log(candidate));
 }
