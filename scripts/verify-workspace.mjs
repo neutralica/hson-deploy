@@ -15,6 +15,12 @@ function requireClean(directory) {
   }
 }
 
+function requireRevision(directory, expected, label) {
+  requireClean(directory);
+  const actual = git(["rev-parse", "HEAD"], directory);
+  if (actual !== expected) throw new Error(`${label} revision ${actual} does not match packaged revision ${expected}.`);
+}
+
 try {
   requireClean(root);
 
@@ -23,16 +29,23 @@ try {
     if (!existsSync(resolve(directory, ".git"))) {
       throw new Error(`${packageName} checkout is missing.`);
     }
-    requireClean(directory);
-
     const treeEntry = git(["ls-tree", "HEAD", "--", packageName]);
     const expected = /^160000 commit ([0-9a-f]{40})\t/.exec(treeEntry)?.[1];
     if (expected === undefined) {
       throw new Error(`${packageName} is not pinned as a gitlink in the deployment workspace.`);
     }
-    const actual = git(["rev-parse", "HEAD"], directory);
-    if (actual !== expected) {
-      throw new Error(`${packageName} revision ${actual} does not match deployment revision ${expected}.`);
+    requireRevision(directory, expected, packageName);
+  }
+
+  const invokingApplicationRoot = process.env.HSON_INVOKING_APPLICATION_ROOT?.trim();
+  if (invokingApplicationRoot) {
+    const invoking = resolve(invokingApplicationRoot);
+    const invokingLibrary = resolve(invoking, "..", "hson-live");
+    for (const [directory, packageName] of [[invoking, "hson-demo2"], [invokingLibrary, "hson-live"]]) {
+      if (!existsSync(resolve(directory, ".git"))) throw new Error(`invoking ${packageName} checkout is missing at ${directory}.`);
+      const expected = /^160000 commit ([0-9a-f]{40})\t/.exec(git(["ls-tree", "HEAD", "--", packageName]))?.[1];
+      if (expected === undefined) throw new Error(`${packageName} is not pinned as a gitlink in the deployment workspace.`);
+      requireRevision(directory, expected, `invoking ${packageName}`);
     }
   }
 

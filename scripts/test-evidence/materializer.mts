@@ -5,13 +5,12 @@ import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promi
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 export const CATEGORIES = Object.freeze(["semantic", "browser", "certification"] as const);
+export const NORMAL_CATEGORIES = Object.freeze(["semantic", "browser"] as const);
 export type Category = typeof CATEGORIES[number];
 type JsonObject = Record<string, any>;
 type ArtifactRecord = Readonly<{ path: string; rawBytes: number; sha256: string }>;
 
-const REQUIRED_CAPTURE_FILES = Object.freeze([
-  "semantic.json", "browser.json", "certification.json", "capture-metadata.json", "capture-cleanup.json",
-]);
+const CAPTURE_CONTROL_FILES = Object.freeze(["capture-metadata.json", "capture-cleanup.json"]);
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -95,8 +94,9 @@ function validate_report(category: Category, report: JsonObject, metadata: JsonO
   }
 }
 
-function validate_accounting(reports: Record<Category, JsonObject>, metadata: JsonObject): JsonObject {
+function validate_accounting(reports: Partial<Record<Category, JsonObject>>, metadata: JsonObject): JsonObject {
   const semantic = reports.semantic;
+  assert.ok(semantic, "TEST_EVIDENCE_SEMANTIC_REPORT_MISSING");
   const semanticCases = semantic.suiteRuns.flatMap((suite: JsonObject) => suite.cases);
   assert.equal(semantic.summary.cases, semanticCases.length, "TEST_EVIDENCE_SEMANTIC_CASE_ACCOUNTING");
   assert.equal(semantic.summary.pass, semanticCases.length, "TEST_EVIDENCE_SEMANTIC_PASS_ACCOUNTING");
@@ -106,22 +106,30 @@ function validate_accounting(reports: Record<Category, JsonObject>, metadata: Js
   const opaqueDeclared = opaque.reduce((total: number, suite: JsonObject) => total + suite.counts.declared, 0);
   assert.equal(opaqueChecks, opaqueDeclared, "TEST_EVIDENCE_OPAQUE_ACCOUNTING");
 
-  const browserCases = reports.browser.suiteRuns.flatMap((suite: JsonObject) => suite.cases);
-  assert.equal(browserCases.length, reports.browser.summary.cases, "TEST_EVIDENCE_BROWSER_CASE_ACCOUNTING");
+  const browser = reports.browser;
+  assert.ok(browser, "TEST_EVIDENCE_BROWSER_REPORT_MISSING");
+  const browserCases = browser.suiteRuns.flatMap((suite: JsonObject) => suite.cases);
+  assert.equal(browserCases.length, browser.summary.cases, "TEST_EVIDENCE_BROWSER_CASE_ACCOUNTING");
   assert.equal(browserCases.every((item: JsonObject) => item.status === "pass"), true, "TEST_EVIDENCE_BROWSER_PASS_ACCOUNTING");
   assert.equal(metadata.runs.browser.journeyCount, browserCases.length, "TEST_EVIDENCE_BROWSER_JOURNEY_ACCOUNTING");
 
-  assert.equal(reports.certification.suiteRuns.length, 57, "TEST_EVIDENCE_CERTIFICATION_DENOMINATOR");
-  assert.equal(metadata.selection.certification.idCount, 57, "TEST_EVIDENCE_CERTIFICATION_SELECTION_DENOMINATOR");
-  assert.deepEqual(metadata.selection.certification.h2, { h2b: 10, h2c: 11, h2d: 7, remaining: 0 }, "TEST_EVIDENCE_H2_ACCOUNTING");
-  const h2Cleanup = reports.certification.suiteRuns.flatMap((suite: JsonObject) => suite.evidence)
-    .filter((entry: JsonObject) => entry.content.includes('"h2Cleanup":"removed"'));
-  assert.equal(h2Cleanup.length, 28, "TEST_EVIDENCE_H2_WORKSPACE_CLEANUP_ACCOUNTING");
+  const certification = reports.certification;
+  if (certification !== undefined) {
+    assert.equal(certification.suiteRuns.length, 57, "TEST_EVIDENCE_CERTIFICATION_DENOMINATOR");
+    assert.equal(metadata.selection.certification.idCount, 57, "TEST_EVIDENCE_CERTIFICATION_SELECTION_DENOMINATOR");
+    assert.deepEqual(metadata.selection.certification.h2, { h2b: 10, h2c: 11, h2d: 7, remaining: 0 }, "TEST_EVIDENCE_H2_ACCOUNTING");
+    const h2Cleanup = certification.suiteRuns.flatMap((suite: JsonObject) => suite.evidence)
+      .filter((entry: JsonObject) => entry.content.includes('"h2Cleanup":"removed"'));
+    assert.equal(h2Cleanup.length, 28, "TEST_EVIDENCE_H2_WORKSPACE_CLEANUP_ACCOUNTING");
+  }
+  const certificationCount = certification === undefined ? 0 : 57;
   return Object.freeze({
     semantic: { canonical: semantic.summary, opaqueChecks: { total: opaqueDeclared, pass: opaqueChecks } },
     browserJourneys: { total: browserCases.length, pass: browserCases.length },
-    certifications: { total: 57, pass: 57 },
-    h2: { b: 10, c: 11, d: 7, remaining: 0, workspacesRemoved: 28, workspacesRemaining: 0 },
+    certifications: { total: certificationCount, pass: certificationCount },
+    h2: certification === undefined
+      ? { b: 0, c: 0, d: 0, remaining: 0, workspacesRemoved: 0, workspacesRemaining: 0 }
+      : { b: 10, c: 11, d: 7, remaining: 0, workspacesRemoved: 28, workspacesRemaining: 0 },
     inspectionReruns: 0,
   });
 }
@@ -138,9 +146,10 @@ export type ValidatedCapture = Readonly<{
   candidate: string;
   capture: string;
   metadata: JsonObject;
+  categories: readonly Category[];
   cleanup: JsonObject;
-  reports: Record<Category, JsonObject>;
-  reportBytes: Record<Category, Buffer>;
+  reports: Partial<Record<Category, JsonObject>>;
+  reportBytes: Partial<Record<Category, Buffer>>;
   accounting: JsonObject;
 }>;
 
@@ -148,28 +157,39 @@ export async function validate_capture(candidate: string, options: { repositoryR
   assert.ok(candidate, "TEST_EVIDENCE_CAPTURE_CANDIDATE_REQUIRED");
   const capture = capture_directory(candidate);
   const available = new Set(await readdir(capture));
-  for (const file of REQUIRED_CAPTURE_FILES) assert.ok(available.has(file), `TEST_EVIDENCE_CAPTURE_FILE_MISSING:${file}`);
+  for (const file of CAPTURE_CONTROL_FILES) assert.ok(available.has(file), `TEST_EVIDENCE_CAPTURE_FILE_MISSING:${file}`);
   const parsed: Record<string, JsonObject> = {};
   const bytes: Record<string, Buffer> = {};
-  for (const file of REQUIRED_CAPTURE_FILES) {
+  for (const file of CAPTURE_CONTROL_FILES) {
     const raw = await readFile(join(capture, file));
     bytes[file] = raw;
     try { parsed[file] = JSON.parse(raw.toString("utf8")); }
     catch { throw new Error(`TEST_EVIDENCE_CAPTURE_JSON_INVALID:${file}`); }
   }
   const metadata = parsed["capture-metadata.json"];
-  assert.deepEqual(metadata.selectedStages, CATEGORIES, "TEST_EVIDENCE_CAPTURE_NOT_COMBINED");
+  const normal = JSON.stringify(metadata.selectedStages) === JSON.stringify(NORMAL_CATEGORIES);
+  const legacyCertified = JSON.stringify(metadata.selectedStages) === JSON.stringify(CATEGORIES);
+  assert.equal(normal || legacyCertified, true, "TEST_EVIDENCE_CAPTURE_NOT_NORMAL_OR_LEGACY_COMBINED");
+  const categories = Object.freeze([...(legacyCertified ? CATEGORIES : NORMAL_CATEGORIES)]) as readonly Category[];
+  for (const category of categories) {
+    const file = `${category}.json`;
+    assert.ok(available.has(file), `TEST_EVIDENCE_CAPTURE_FILE_MISSING:${file}`);
+    const raw = await readFile(join(capture, file));
+    bytes[file] = raw;
+    try { parsed[file] = JSON.parse(raw.toString("utf8")); }
+    catch { throw new Error(`TEST_EVIDENCE_CAPTURE_JSON_INVALID:${file}`); }
+  }
   validate_cleanup(parsed["capture-cleanup.json"]);
-  const reports = Object.fromEntries(CATEGORIES.map((category) => [category, parsed[`${category}.json`]])) as Record<Category, JsonObject>;
-  const reportBytes = Object.fromEntries(CATEGORIES.map((category) => [category, bytes[`${category}.json`]])) as Record<Category, Buffer>;
-  for (const category of CATEGORIES) validate_report(category, reports[category], metadata, reportBytes[category].byteLength);
+  const reports = Object.fromEntries(categories.map((category) => [category, parsed[`${category}.json`]])) as Partial<Record<Category, JsonObject>>;
+  const reportBytes = Object.fromEntries(categories.map((category) => [category, bytes[`${category}.json`]])) as Partial<Record<Category, Buffer>>;
+  for (const category of categories) validate_report(category, reports[category]!, metadata, reportBytes[category]!.byteLength);
   const accounting = validate_accounting(reports, metadata);
-  const allSuites = CATEGORIES.flatMap((category) => reports[category].suiteRuns.map((suite: JsonObject) => suite.id));
-  const allCases = CATEGORIES.flatMap((category) => reports[category].suiteRuns.flatMap((suite: JsonObject) => suite.cases.map((item: JsonObject) => item.id)));
+  const allSuites = categories.flatMap((category) => reports[category]!.suiteRuns.map((suite: JsonObject) => suite.id));
+  const allCases = categories.flatMap((category) => reports[category]!.suiteRuns.flatMap((suite: JsonObject) => suite.cases.map((item: JsonObject) => item.id)));
   assert_unique(allSuites, "GLOBAL_SUITE_ID");
   assert_unique(allCases, "GLOBAL_CASE_ID");
   if (options.verifyRevisions !== false) verify_revisions(resolve(options.repositoryRoot ?? join(import.meta.dirname, "../..")), metadata.deployment);
-  return Object.freeze({ candidate: resolve(candidate), capture, metadata, cleanup: parsed["capture-cleanup.json"], reports, reportBytes, accounting });
+  return Object.freeze({ candidate: resolve(candidate), capture, metadata, categories, cleanup: parsed["capture-cleanup.json"], reports, reportBytes, accounting });
 }
 
 function artifact_tuple_digest(records: readonly ArtifactRecord[]): string {
@@ -222,9 +242,9 @@ export async function materialize_test_evidence(captureCandidate: string, option
   let caseArtifactCount = 0;
   let suiteArtifactCount = 0;
   try {
-    for (const category of CATEGORIES) {
-      reportRecords[category] = await record_file(evidenceRoot, `reports/${category}.json`, source.reportBytes[category], records);
-      for (const suite of source.reports[category].suiteRuns) {
+    for (const category of source.categories) {
+      reportRecords[category] = await record_file(evidenceRoot, `reports/${category}.json`, source.reportBytes[category]!, records);
+      for (const suite of source.reports[category]!.suiteRuns) {
         const evidenceById = new Map(suite.evidence.map((entry: JsonObject) => [entry.id, entry]));
         const childReferences = new Set<string>(suite.cases.flatMap((item: JsonObject) => item.evidenceRefs));
         const ownedReferences = suite.evidenceRefs.filter((id: string) => !childReferences.has(id));
@@ -260,6 +280,10 @@ export async function materialize_test_evidence(captureCandidate: string, option
     }
     const categories = CATEGORIES.map((category) => {
       const report = source.reports[category];
+      if (report === undefined) return {
+        id: category, status: "cancelled", suiteCounts: status_counts([]), caseCounts: status_counts([]), summary: { cases: 0, pass: 0, fail: 0, skip: 0 },
+        timing: { startedAt: null, completedAt: null, runnerMs: null, hostMs: null }, evidenceAvailable: false, report: { available: false },
+      };
       const categorySuites = suites.filter((suite) => suite.category === category);
       const categoryCases = categorySuites.flatMap((suite) => suite.cases);
       return {
@@ -283,14 +307,14 @@ export async function materialize_test_evidence(captureCandidate: string, option
       materializedAt: options.materializedAt ?? new Date().toISOString(),
       deployment: source.metadata.deployment,
       runtime: source.metadata.runtime,
-      runs: Object.fromEntries(CATEGORIES.map((category) => [category, {
+      runs: Object.fromEntries(source.categories.map((category) => [category, {
         runId: source.metadata.runs[category].runId,
         reportHostId: source.metadata.runs[category].reportHostId,
         reportRev: source.metadata.runs[category].reportRev,
         reportPath: reportRecords[category].path,
         reportBytes: reportRecords[category].rawBytes,
         reportSha256: reportRecords[category].sha256,
-        terminalSummary: category === "certification" ? { status: "passed", certifications: 57 } : { status: "passed", ...source.reports[category].summary },
+        terminalSummary: category === "certification" ? { status: "passed", certifications: 57 } : { status: "passed", ...source.reports[category]!.summary },
       }])),
       accounting: source.accounting,
       artifactSet,
@@ -325,7 +349,7 @@ export async function verify_materialized_evidence(source: ValidatedCapture, evi
   assert.deepEqual(index.deployment, source.metadata.deployment, "TEST_EVIDENCE_INDEX_DEPLOYMENT_MUTATED");
   assert.deepEqual(index.accounting, source.accounting, "TEST_EVIDENCE_INDEX_ACCOUNTING_MUTATED");
   assert.deepEqual(provenance.accounting, source.accounting, "TEST_EVIDENCE_PROVENANCE_ACCOUNTING_MUTATED");
-  const sourceSuites = CATEGORIES.flatMap((category) => source.reports[category].suiteRuns.map((suite: JsonObject) => ({ category, suite })));
+  const sourceSuites = source.categories.flatMap((category) => source.reports[category]!.suiteRuns.map((suite: JsonObject) => ({ category, suite })));
   assert.equal(index.suites.length, sourceSuites.length, "TEST_EVIDENCE_INDEX_SUITE_OMISSION");
   assert.deepEqual(index.suites.map((suite: JsonObject) => `${suite.category}\0${suite.id}`), sourceSuites.map(({ category, suite }) => `${category}\0${suite.id}`), "TEST_EVIDENCE_INDEX_SUITE_ORDER_MUTATED");
   let sourceEvidenceCount = 0;
@@ -372,7 +396,7 @@ export async function verify_materialized_evidence(source: ValidatedCapture, evi
   }
   assert.equal(index.suites.flatMap((suite: JsonObject) => suite.cases).length, sourceCaseCount, "TEST_EVIDENCE_INDEX_CASE_OMISSION");
   assert.equal(projectedEvidenceCount, sourceEvidenceCount, "TEST_EVIDENCE_RETAINED_EVIDENCE_PARTITION");
-  for (const category of CATEGORIES) {
+  for (const category of source.categories) {
     const bytes = await readFile(join(evidenceRoot, `reports/${category}.json`));
     assert.deepEqual(bytes, source.reportBytes[category], `TEST_EVIDENCE_FULL_REPORT_MUTATED:${category}`);
     assert.equal(provenance.runs[category].reportSha256, sha256(bytes), `TEST_EVIDENCE_REPORT_HASH_MUTATED:${category}`);
@@ -392,7 +416,7 @@ export async function measure_package(result: MaterializationResult): Promise<Js
   const index = await parse_json(join(result.evidenceRoot, "index.json"));
   const caseRecords = index.suites.flatMap((suite: JsonObject) => suite.cases.map((item: JsonObject) => item.evidence).filter((entry: JsonObject) => entry.available));
   const suiteRecords = index.suites.map((suite: JsonObject) => suite.evidence).filter((entry: JsonObject) => entry.available);
-  const fullReports = CATEGORIES.map((category) => index.categories.find((entry: JsonObject) => entry.id === category).report);
+  const fullReports = index.categories.map((entry: JsonObject) => entry.report).filter((entry: JsonObject) => entry?.available !== false);
   const allFiles = await list_files(result.evidenceRoot);
   const completeBytes = (await Promise.all(allFiles.map((path) => stat(join(result.evidenceRoot, path))))).reduce((total, item) => total + item.size, 0);
   const largest = (records: JsonObject[]) => records.reduce((current, entry) => entry.rawBytes > current.rawBytes ? entry : current, { rawBytes: 0 });
@@ -400,7 +424,7 @@ export async function measure_package(result: MaterializationResult): Promise<Js
     indexRawBytes: (await stat(join(result.evidenceRoot, "index.json"))).size,
     caseArtifacts: { count: caseRecords.length, rawBytes: caseRecords.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(caseRecords) },
     suiteArtifacts: { count: suiteRecords.length, rawBytes: suiteRecords.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(suiteRecords) },
-    fullReports: { rawBytes: fullReports.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(fullReports), entries: Object.fromEntries(CATEGORIES.map((category, index_) => [category, fullReports[index_]])) },
+    fullReports: { rawBytes: fullReports.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(fullReports), entries: Object.fromEntries(index.categories.filter((entry: JsonObject) => entry.report?.available !== false).map((entry: JsonObject) => [entry.id, entry.report])) },
     lazyArtifactRawBytes: [...caseRecords, ...suiteRecords].reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0),
     completePackageRawBytes: completeBytes,
   });

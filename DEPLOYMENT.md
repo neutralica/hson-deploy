@@ -23,6 +23,23 @@ endpoint, and provider-neutral TLS/WebSocket/process-supervision requirements.
 
 ## Static frontend (frozen public test evidence)
 
+LiveDemo owns the certified package command and test policy. This repository retains the deployment-workspace
+primitives for clean gitlink verification, capture, evidence materialization, static assembly, and artifact
+verification. `npm run pack` and `npm run certify` are convenience entrypoints into the single hson-demo2
+implementation; they do not contain a second pipeline.
+
+`pack` requires a clean superproject, clean pinned submodules, and (when invoked through a sibling consumer
+checkout) the exact same clean hson-demo2 and hson-live revisions as those gitlinks. It rebuilds
+`hson-live/dist` before capture, captures only the normal semantic and browser evidence, and then uses the
+existing Phase 3 materializer and static assembler/verifier. Its canonical outputs are `.deployment-work/`
+for captures and accepted evidence packages and `static-production/` for the verified frozen explorer
+artifact.
+
+`certify` first runs the complete integrated hson-demo2 + hson-live authority, then calls the same `pack`
+implementation sequentially. On success it adds `static-production/certification-receipt.json`, tied to the
+packed deployment commit and evidence artifact-set hash. The receipt is the deliberately small distinction
+between a packed explorer and one that passed the declared release authority.
+
 The ordinary production frontend is a separately published static Vite artifact.
 Build it from an accepted Phase 3 materialization:
 

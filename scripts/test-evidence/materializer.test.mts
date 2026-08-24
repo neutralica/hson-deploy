@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { decode_frozen_test_evidence_index } from "../../hson-demo2/src/app/demos/tests/panel/frozen-test-evidence-client";
 import { decode_artifact_id, encode_artifact_id, materialize_test_evidence, validate_capture, verify_materialized_evidence } from "./materializer.mjs";
 import { make_capture } from "./test-fixture.mjs";
 
@@ -23,7 +24,23 @@ test("failed and incomplete captures reject before evidence is read", async () =
   const metadata = JSON.parse(await readFile(join(incomplete.capture, "capture-metadata.json"), "utf8"));
   metadata.selectedStages = ["semantic"];
   await writeFile(join(incomplete.capture, "capture-metadata.json"), JSON.stringify(metadata));
-  await assert.rejects(validate_capture(incomplete.candidate, { verifyRevisions: false }), /CAPTURE_NOT_COMBINED/);
+  await assert.rejects(validate_capture(incomplete.candidate, { verifyRevisions: false }), /CAPTURE_NOT_NORMAL_OR_LEGACY_COMBINED/);
+});
+
+test("normal semantic and browser capture materializes without executing certification aggregates", async () => {
+  const root = await temporary();
+  const fixture = await make_capture(root);
+  const metadata = JSON.parse(await readFile(join(fixture.capture, "capture-metadata.json"), "utf8"));
+  metadata.selectedStages = ["semantic", "browser"];
+  delete metadata.runs.certification;
+  await writeFile(join(fixture.capture, "capture-metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+  await rm(join(fixture.capture, "certification.json"));
+  const result = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
+  assert.deepEqual(result.index.selectionCategories, ["semantic", "browser", "certification"]);
+  assert.equal(result.index.categories.find((category: any) => category.id === "certification").status, "cancelled");
+  assert.deepEqual(Object.keys(result.provenance.runs), ["semantic", "browser"]);
+  assert.equal(result.index.suites.some((suite: any) => suite.category === "certification"), false);
+  assert.equal(decode_frozen_test_evidence_index(result.index, "a".repeat(40)).categories.length, 3);
 });
 
 test("path encoding is reversible, filesystem-safe, and collision-free", () => {
