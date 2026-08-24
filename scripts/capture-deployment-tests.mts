@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform, version as nodeVersion } from "node:process";
 import { basename, dirname, join, resolve } from "node:path";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import WebSocket from "ws";
 import type { BrowserWebSocketConstructor } from "../hson-demo2/src/app/demos/tests/hosted-client/browser-websocket-socket";
 import { make_hosted_test_panel_adapter, type HostedTestPanelSink } from "../hson-demo2/src/app/demos/tests/panel/hosted-test-panel-adapter";
@@ -12,6 +13,8 @@ import type { HostedTestReport } from "../hson-demo2/src/shared/hosted-tests/hos
 import type { TestExecutorDiscovery } from "../hson-demo2/src/shared/testing/test-discovery-contract";
 import type { HostedTestTimelineEvent } from "../hson-demo2/src/shared/hosted-tests/hosted-test-timeline";
 import { start_hosted_test_server } from "../hson-demo2/tests/harness/runtimes/node/server/hosted-test-server";
+import { BROWSER_SUITE_MANIFEST } from "../hson-demo2/tests/harness/runtimes/node/browser/browser-test-manifest";
+import { build_test_surface_census, classify_certification_surface, reconcile_certification_accounting } from "../hson-demo2/tests/harness/hosted/test-surface-census";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const DEMO = join(ROOT, "hson-demo2");
@@ -19,6 +22,7 @@ type Name = "semantic" | "browser" | "certification";
 type Selection = Readonly<{ name: Name; ids: readonly string[] }>;
 export type DeploymentCaptureOptions = Readonly<{ stages?: readonly Name[] }>;
 type EvidenceClassification = Readonly<{ selfContained: number; transientIrrelevant: number; transientRequired: number }>;
+type CertificationAccounting = Readonly<{ h2b: number; h2c: number; h2d: number; remaining: number }>;
 
 function git(args: readonly string[], cwd = ROOT): string { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
 function state() {
@@ -39,11 +43,31 @@ export function derive_selections(discovery: TestExecutorDiscovery): readonly Se
   const caseIds = (shape: string) => discovery.catalog.tests.filter((test) => suites.get(test.suiteId)?.executionShape === shape).map((test) => test.id);
   const semantic = [...caseIds("cases"), ...discovery.catalog.suites.filter((suite) => suite.executionShape === "opaque-aggregate").map((suite) => suite.id)];
   const browser = caseIds("browser-journeys");
-  const certification = discovery.catalog.suites.filter((suite) => suite.executionShape === "certification-aggregate" && !suite.requirements.includes("dynamic-generated")).map((suite) => {
-    if (!suite.sourceRef?.startsWith("node-command:")) throw new Error(`DEPLOYMENT_CAPTURE_CERTIFICATION_SOURCE:${suite.id}`); return suite.id;
+  const certificationSuites = discovery.catalog.suites.filter((suite) => suite.executionShape === "certification-aggregate" && !suite.requirements.includes("dynamic-generated"));
+  const certification = certificationSuites.map((suite) => {
+    if (!suite.sourceRef?.startsWith("node-command:")) throw new Error(`DEPLOYMENT_CAPTURE_CERTIFICATION_SOURCE:${suite.id}`);
+    return suite.id;
   });
+  unique(certificationSuites.map((suite) => suite.sourceRef!), "certification-source-ref");
   if (!semantic.length || !browser.length || !certification.length) throw new Error("DEPLOYMENT_CAPTURE_EMPTY_SELECTION");
   return Object.freeze([Object.freeze({ name: "semantic" as const, ids: unique(semantic, "semantic") }), Object.freeze({ name: "browser" as const, ids: unique(browser, "browser") }), Object.freeze({ name: "certification" as const, ids: unique(certification, "certification") })]);
+}
+function certification_accounting(discovery: TestExecutorDiscovery, selection: readonly string[]): CertificationAccounting {
+  const census = build_test_surface_census(BROWSER_SUITE_MANIFEST.map((suite) => ({ path: suite.path, cases: suite.journeys.length })));
+  const accounting = reconcile_certification_accounting(census);
+  const supported = census.filter((entry) => classify_certification_surface(entry) === "SUPPORTED_CERTIFICATION" && entry.currentLocalLocusAvailability)
+    .map((entry) => entry.id);
+  const selectedSources = discovery.catalog.suites.filter((suite) => selection.includes(suite.id)).map((suite) => suite.sourceRef?.slice("node-command:".length));
+  assert.equal(selectedSources.every((source) => source !== undefined), true, "DEPLOYMENT_CAPTURE_CERTIFICATION_SOURCE_MISSING");
+  assert.deepEqual([...selectedSources].sort(), [...supported].sort(), "DEPLOYMENT_CAPTURE_CERTIFICATION_CENSUS_MISMATCH");
+  assert.equal(selection.length, 57, "DEPLOYMENT_CAPTURE_CERTIFICATION_DENOMINATOR_DRIFT");
+  assert.equal(accounting.supportedCertifications, 57, "DEPLOYMENT_CAPTURE_CERTIFICATION_ACCOUNTING_DRIFT");
+  assert.equal(accounting.h2bSupportedAdditions, 10, "DEPLOYMENT_CAPTURE_H2B_DRIFT");
+  assert.equal(accounting.h2cSupportedAdditions, 11, "DEPLOYMENT_CAPTURE_H2C_DRIFT");
+  assert.equal(accounting.h2dSupportedAdditions, 7, "DEPLOYMENT_CAPTURE_H2D_DRIFT");
+  assert.equal(accounting.remainingH2CD, 0, "DEPLOYMENT_CAPTURE_H2_REMAINING");
+  assert.equal(discovery.catalog.suites.filter((suite) => suite.executionShape === "certification-aggregate" && suite.requirements.includes("dynamic-generated")).length > 0, true, "DEPLOYMENT_CAPTURE_DYNAMIC_SURFACE_MISSING");
+  return Object.freeze({ h2b: accounting.h2bSupportedAdditions, h2c: accounting.h2cSupportedAdditions, h2d: accounting.h2dSupportedAdditions, remaining: accounting.remainingH2CD });
 }
 async function atomic(path: string, value: unknown) { const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`); const temp = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`); await writeFile(temp, bytes, { flag: "wx" }); JSON.parse(await readFile(temp, "utf8")); await rename(temp, path); return bytes.byteLength; }
 async function revalidate(path: string): Promise<HostedTestReport> { return JSON.parse(await readFile(path, "utf8")) as HostedTestReport; }
@@ -61,7 +85,7 @@ function failed_report_summary(report: HostedTestReport | undefined) {
     terminalStatus: report.run.status,
     summary: report.summary,
     failingSuites: report.suiteRuns.filter((suite) => suite.status !== "pass").map((suite) => ({
-      id: suite.id, status: suite.status, errors: suite.errors,
+      id: suite.id, status: suite.status, errors: suite.errors, evidence: suite.evidence,
       failingCases: suite.cases.filter((test) => test.status !== "pass").map((test) => ({ id: test.id, status: test.status, err: test.err, errors: test.errors, evidenceRefs: test.evidenceRefs })),
     })),
   };
@@ -97,7 +121,18 @@ function validate(name: Name, intended: readonly string[], report: HostedTestRep
     assert.deepEqual(browserCases.map((test) => test.id).sort(), [...intended].sort(), "browser journey report identity must exactly match selection");
     assert.equal(summary.browser.pass, intended.length);
   }
-  if (name === "certification") assert.equal(summary.certifications.pass, intended.length);
+  if (name === "certification") {
+    assert.equal(summary.certifications.pass, intended.length);
+    assert.equal(report.suiteRuns.length, intended.length, "every certification must have one suite run");
+    assert.equal(report.suiteRuns.every((suite) => suite.executionShape === "certification-aggregate"), true, "certification capture contains a non-certification suite");
+    assert.equal(report.suiteRuns.every((suite) => suite.sourceRef?.startsWith("node-command:") && !suite.id.includes("generated-json")), true, "certification capture has an invalid source or dynamic surface");
+  }
+}
+function certification_metrics(report: HostedTestReport, raw: Buffer) {
+  const suiteBytes = report.suiteRuns.map((suite) => ({ id: suite.id, bytes: Buffer.byteLength(JSON.stringify(suite)) }));
+  const outputBytes = report.suiteRuns.map((suite) => ({ id: suite.id, bytes: suite.evidence.filter((entry) => entry.kind === "stdout" || entry.kind === "stderr" || entry.kind === "raw_process_output").reduce((total, entry) => total + Buffer.byteLength(entry.content), 0) }));
+  const largest = <T extends { bytes: number }>(values: readonly T[]) => values.reduce((current, value) => value.bytes > current.bytes ? value : current);
+  return Object.freeze({ rawBytes: raw.byteLength, gzipBytes: gzipSync(raw).byteLength, brotliBytes: brotliCompressSync(raw).byteLength, suiteCount: report.suiteRuns.length, evidenceEntries: report.suiteRuns.reduce((total, suite) => total + suite.evidence.length, 0), largestConstituent: largest(suiteBytes), largestOutputBearingConstituent: largest(outputBytes) });
 }
 function stage_name(event: HostedTestTimelineEvent): string | undefined {
   const names: Partial<Record<HostedTestTimelineEvent["stage"], string>> = {
@@ -127,8 +162,8 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
   const before = state(); const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); let stage = "server-start"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined;
   try {
     process.chdir(DEMO); server = await start_hosted_test_server({ host: "127.0.0.1", port: 0, shutdownTimeoutMs: 15_000, retainRichDiagnostics: true, timeline: observe, authorityLifecycle: { maxTowlRooms: 8, towlIdleMs: 30_000, maxHostedReports: 8, hostedReportRetentionMs: 3_600_000, sweepIntervalMs: 30_000 } });
-    stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: observe }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); selection = Object.fromEntries(selections.map((selected) => [selected.name, { idCount: selected.ids.length, ids: selected.ids }])); const runs: Record<string, unknown> = {};
-    for (const selected of selections) { if (requestedStages && !requestedStages.includes(selected.name)) continue; stage = `${selected.name}:association`; const result = await adapter.start_selected(selected.ids); stage = `${selected.name}:validation`; const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selected.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; latestReport = snapshot; validate(selected.name, selected.ids, snapshot, result); const evidence = evidence_classification(snapshot); stage = `${selected.name}:atomic-write`; const reportFile = `${selected.name}.json`; const reportPath = join(capture, reportFile); const rawBytes = await atomic(reportPath, snapshot); const revalidated = await revalidate(reportPath); assert.deepEqual(revalidated, snapshot, "atomically written report must independently revalidate"); runs[selected.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, reportFile, selectionCount: selected.ids.length, journeyCount: selected.name === "browser" ? snapshot.suiteRuns.flatMap((suite) => suite.cases).length : undefined, terminalStatus: snapshot.run.status, rawBytes, evidence }; }
+    stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: observe }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); const certification = certification_accounting(discovery, selections.find((selected) => selected.name === "certification")!.ids); selection = Object.fromEntries(selections.map((selected) => [selected.name, { idCount: selected.ids.length, ids: selected.ids, ...(selected.name === "certification" ? { h2: certification } : {}) }])); const runs: Record<string, unknown> = {};
+    for (const selected of selections) { if (requestedStages && !requestedStages.includes(selected.name)) continue; stage = `${selected.name}:association`; const result = await adapter.start_selected(selected.ids); stage = `${selected.name}:validation`; const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selected.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; latestReport = snapshot; validate(selected.name, selected.ids, snapshot, result); const evidence = evidence_classification(snapshot); stage = `${selected.name}:atomic-write`; const reportFile = `${selected.name}.json`; const reportPath = join(capture, reportFile); const rawBytes = await atomic(reportPath, snapshot); const revalidated = await revalidate(reportPath); assert.deepEqual(revalidated, snapshot, "atomically written report must independently revalidate"); runs[selected.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, clientAppliedReportRev: result.reportRev, reportFile, selectionCount: selected.ids.length, journeyCount: selected.name === "browser" ? snapshot.suiteRuns.flatMap((suite) => suite.cases).length : undefined, terminalStatus: snapshot.run.status, rawBytes, evidence, ...(selected.name === "certification" ? { metrics: certification_metrics(snapshot, Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`)) } : {}) }; }
     stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs }); return candidate;
   } catch (error) {
     const cause = error instanceof Error ? error : new Error(String(error));
