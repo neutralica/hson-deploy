@@ -21,22 +21,30 @@ prepared workspace. See [`hson-demo2/DEPLOYMENT.md`](./hson-demo2/DEPLOYMENT.md)
 for the exact runtime boundary, environment contract, `/healthz` readiness
 endpoint, and provider-neutral TLS/WebSocket/process-supervision requirements.
 
-## Static frontend (Node authority)
+## Static frontend (frozen public test evidence)
 
 The ordinary production frontend is a separately published static Vite artifact.
-Build it with the public Node WebSocket service origin:
+Build it from an accepted Phase 3 materialization:
 
 ```sh
-VITE_HOSTED_TEST_WS_URL=wss://<node-service-host> npm run prepare:static-production
+VITE_TEST_EVIDENCE_ROOT=/test-evidence/<exact-40-hex-hson-deploy-commit> \
+TEST_EVIDENCE_ACCEPTANCE_FILE=/absolute/path/to/accepted.json \
+npm run prepare:static-production
 ```
 
-This command validates the public client configuration, builds a deployment-owned
-Vite artifact in `static-production/`, and confirms that the configured endpoint
-is embedded. The `hson-demo2` submodule remains source-only and clean. It does not
-deploy or publish the artifact. `VITE_TOWL_WS_URL` and
-`VITE_CIRCUIT_VERIFICATION_WS_URL` are optional explicit overrides; when they
-are absent, those clients use the hosted endpoint and derive `/towl` and
-`/circuit-verification` respectively. Hosted tests derive `/hosted-tests`.
+This command validates the accepted immutable evidence root, builds a
+deployment-owned Vite artifact in `static-production/`, promotes only the public
+index and indexed case/suite row artifacts, and verifies their raw bytes. It does
+not deploy or publish the artifact. The public frozen test explorer uses ordinary
+HTTP and does not require `VITE_HOSTED_TEST_WS_URL`, a hosted-test WebSocket, or
+visitor-triggered execution. Complete semantic, browser, and certification
+reports—and `provenance.json`—remain in the accepted build/archive materialization.
+
+`VITE_HOSTED_TEST_WS_URL` is still an optional shared live endpoint for existing
+TOWL and circuit-verification clients when their explicit `VITE_TOWL_WS_URL` and
+`VITE_CIRCUIT_VERIFICATION_WS_URL` overrides are absent. That coupling is not a
+hosted-test requirement of the frozen public panel. Live/internal test execution,
+LiveHost, and Locus/report authorities remain separate certification capabilities.
 
 `VITE_*` values are browser-visible. Never place `LOCUS_BEARER_TOKEN`, a bearer
 token, or any other credential in a Vite variable. Browser authentication uses
