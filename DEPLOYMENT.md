@@ -23,6 +23,28 @@ endpoint, and provider-neutral TLS/WebSocket/process-supervision requirements.
 
 ## Static frontend (frozen public test evidence)
 
+The authoritative public frontend deployment is an explicit Cloudflare Pages
+direct upload to the existing `hson-deploy` project. `npm run deploy:static`
+verifies the already-assembled `static-production/` artifact, confirms that the
+authenticated Cloudflare account exposes exactly that named target, and then
+runs the equivalent of:
+
+```sh
+wrangler pages deploy static-production --project-name=hson-deploy --branch=main
+```
+
+It does not build, test, certify, regenerate evidence, deploy the Worker, create
+a Pages project, or change custom domains. The existing Cloudflare Pages Git
+integration remains externally enabled and should be disabled before direct
+upload becomes the sole production publication authority.
+
+The root operator command is `npm run deploy`. It runs the existing guarded
+`subs:update` reconciliation and workspace verification, reuses an existing
+artifact only when its certification receipt identifies the current deployment
+commit and evidence hash and the exact static bytes still verify against the
+matching accepted materialization, otherwise runs the existing `certify`
+command, and finally invokes `deploy:static`.
+
 LiveDemo owns the certified package command and test policy. This repository retains the deployment-workspace
 primitives for clean gitlink verification, capture, evidence materialization, static assembly, and artifact
 verification. `npm run pack` and `npm run certify` are convenience entrypoints into the single hson-demo2
