@@ -1,0 +1,86 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { decode_artifact_id, encode_artifact_id, materialize_test_evidence, validate_capture, verify_materialized_evidence } from "./materializer.mjs";
+import { make_capture } from "./test-fixture.mjs";
+
+async function temporary() { return mkdtemp(join(tmpdir(), "hson-evidence-")); }
+
+test("successful source capture validation proves terminal accounting and cleanup", async () => {
+  const fixture = await make_capture(await temporary());
+  const source = await validate_capture(fixture.candidate, { verifyRevisions: false });
+  assert.deepEqual(source.accounting.h2, { b: 10, c: 11, d: 7, remaining: 0, workspacesRemoved: 28, workspacesRemaining: 0 });
+  assert.equal(source.accounting.inspectionReruns, 0);
+});
+
+test("failed and incomplete captures reject before evidence is read", async () => {
+  const fixture = await make_capture(await temporary());
+  await writeFile(join(fixture.capture, "browser.json"), "{broken");
+  await assert.rejects(validate_capture(fixture.candidate, { verifyRevisions: false }), /CAPTURE_JSON_INVALID:browser.json/);
+  const incomplete = await make_capture(await temporary());
+  const metadata = JSON.parse(await readFile(join(incomplete.capture, "capture-metadata.json"), "utf8"));
+  metadata.selectedStages = ["semantic"];
+  await writeFile(join(incomplete.capture, "capture-metadata.json"), JSON.stringify(metadata));
+  await assert.rejects(validate_capture(incomplete.candidate, { verifyRevisions: false }), /CAPTURE_NOT_COMBINED/);
+});
+
+test("path encoding is reversible, filesystem-safe, and collision-free", () => {
+  const ids = ["suite/case::one", "suite case/☃", "suite_case-one"];
+  const encoded = ids.map(encode_artifact_id);
+  assert.equal(new Set(encoded).size, ids.length);
+  assert.equal(encoded.every((value) => /^[A-Za-z0-9_-]+$/.test(value)), true);
+  assert.deepEqual(encoded.map(decode_artifact_id), ids);
+});
+
+test("index and lazy artifacts exactly partition retained case and suite evidence", async () => {
+  const root = await temporary();
+  const fixture = await make_capture(root);
+  const result = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
+  assert.equal(result.verification.caseCount, 2);
+  assert.equal(result.verification.caseArtifactCount, 2);
+  assert.equal(result.verification.suiteArtifactCount, 58);
+  assert.equal(result.verification.evidenceEntryCount, 59);
+  assert.equal(result.index.suites.length, 60);
+  assert.equal(JSON.stringify(result.index).includes("transformerArtifact"), false);
+  assert.equal(JSON.stringify(result.index).includes("browser attachment"), false);
+  const semantic = result.index.suites.find((entry: any) => entry.id === "semantic/suite");
+  assert.equal(semantic.cases[0].evidence.rawBytes, (await stat(join(result.evidenceRoot, semantic.cases[0].evidence.path))).size);
+});
+
+test("canonical report bytes, report hashes, provenance, and artifact-set digest independently verify", async () => {
+  const root = await temporary();
+  const fixture = await make_capture(root);
+  const source = await validate_capture(fixture.candidate, { verifyRevisions: false });
+  const result = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
+  assert.deepEqual(await readFile(join(result.evidenceRoot, "reports/semantic.json")), await readFile(join(fixture.capture, "semantic.json")));
+  assert.deepEqual(result.provenance.deployment, fixture.metadata.deployment);
+  assert.equal(result.provenance.runs.semantic.reportBytes, (await stat(join(fixture.capture, "semantic.json"))).size);
+  await verify_materialized_evidence(source, result.evidenceRoot);
+  const casePath = result.index.suites[0].cases[0].evidence.path;
+  await writeFile(join(result.evidenceRoot, casePath), "{}\n");
+  await assert.rejects(verify_materialized_evidence(source, result.evidenceRoot), /CASE_SIZE_MISMATCH|CASE_MUTATED/);
+});
+
+test("repeat materialization is byte-deterministic when materializedAt is fixed", async () => {
+  const root = await temporary();
+  const fixture = await make_capture(root);
+  const first = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work-a"), verifyRevisions: false, materializedAt: "fixed" });
+  const second = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work-b"), verifyRevisions: false, materializedAt: "fixed" });
+  assert.equal(first.provenance.artifactSet.sha256, second.provenance.artifactSet.sha256);
+  assert.deepEqual(await readFile(join(first.evidenceRoot, "index.json")), await readFile(join(second.evidenceRoot, "index.json")));
+  assert.deepEqual(await readFile(join(first.evidenceRoot, "provenance.json")), await readFile(join(second.evidenceRoot, "provenance.json")));
+});
+
+test("a failed fresh candidate is never accepted or reused", async () => {
+  const root = await temporary();
+  const fixture = await make_capture(root, { longCaseId: true });
+  const work = join(root, "deployment-owned-work");
+  await assert.rejects(materialize_test_evidence(fixture.candidate, { workRoot: work, verifyRevisions: false }), /MATERIALIZATION_INCOMPLETE/);
+  const candidates = await readdir(work);
+  assert.equal(candidates.length, 1);
+  await assert.rejects(stat(join(work, candidates[0], "accepted.json")));
+  assert.equal(join(work, candidates[0]).includes("hson-demo2"), false);
+  assert.equal(join(work, candidates[0]).includes("hson-live"), false);
+});
