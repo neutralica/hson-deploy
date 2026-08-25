@@ -213,17 +213,22 @@ test("focused certification reaches terminal capture finalization after all owne
   }
 });
 
-test("capture CLI persists, emits, and exits settled pass and fail outcomes despite a referenced handle", async () => {
-  const moduleUrl = pathToFileURL(resolve(DEPLOYMENT_ROOT, "scripts/capture-deployment-tests.mts")).href;
+test("production npm/tsx capture CLI persists, emits, and exits pass and fail outcomes despite a referenced handle", async () => {
+  const preloadUrl = pathToFileURL(resolve(import.meta.dirname, "fixtures/capture-cli-command-preload.mjs")).href;
   const root = await mkdtemp(join(tmpdir(), "deployment-capture-cli-terminal-"));
   try {
-    for (const fixture of [{ status: "passed", failure: false, exitCode: 0 }, { status: "failed", failure: true, exitCode: 1 }]) {
+    for (const fixture of [{ status: "passed", exitCode: 0 }, { status: "failed", exitCode: 1 }]) {
       const candidate = join(root, fixture.status);
       const terminalPath = join(candidate, "capture", "capture-terminal.json");
-      const source = `setInterval(()=>{},60_000);const fs=await import("node:fs");const m=await import(${JSON.stringify(moduleUrl)});await m.run_deployment_capture_command([], {capture:async()=>{fs.mkdirSync(${JSON.stringify(join(candidate, "capture"))},{recursive:true});fs.writeFileSync(${JSON.stringify(terminalPath)},JSON.stringify({status:${JSON.stringify(fixture.status)}}));${fixture.failure ? "throw new Error('fixture failure')" : `return ${JSON.stringify(candidate)}`}}});`;
-      const child = spawn(process.execPath, ["--import=tsx", "--input-type=module", "--eval", source], {
+      const child = spawn("npm", ["run", "capture:deployment-tests:certification"], {
         cwd: DEPLOYMENT_ROOT,
         stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preloadUrl}`].filter(Boolean).join(" "),
+          DEPLOYMENT_CAPTURE_CLI_FIXTURE_CANDIDATE: candidate,
+          DEPLOYMENT_CAPTURE_CLI_FIXTURE_STATUS: fixture.status,
+        },
       });
       let stdout = "";
       let stderr = "";
@@ -232,14 +237,15 @@ test("capture CLI persists, emits, and exits settled pass and fail outcomes desp
       child.stdout.on("data", (chunk: string) => { stdout += chunk; });
       child.stderr.on("data", (chunk: string) => { stderr += chunk; });
       const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
-      assert.deepEqual(JSON.parse(await readFile(terminalPath, "utf8")), { status: fixture.status }, "terminal record must exist before command completion");
+      assert.deepEqual(JSON.parse(await readFile(terminalPath, "utf8")), { status: fixture.status, lastCheckpoint: "fixture-terminal-persisted" }, "terminal record must exist before command completion");
+      assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/, "npm must launch the production tsx command");
       assert.equal(signal, null);
       assert.equal(code, fixture.exitCode);
-      if (fixture.failure) {
-        assert.equal(stdout, "");
-        assert.match(stderr, /^Error: fixture failure[\s\S]*\n$/);
+      if (fixture.status === "failed") {
+        assert.doesNotMatch(stdout, new RegExp(`${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
+        assert.match(stderr, /Error: DEPLOYMENT_CAPTURE_CLI_FIXTURE_FAILURE[\s\S]*\n/);
       } else {
-        assert.equal(stdout, `${candidate}\n`);
+        assert.match(stdout, new RegExp(`${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
         assert.equal(stderr, "");
       }
       assert.ok(child.pid !== undefined);

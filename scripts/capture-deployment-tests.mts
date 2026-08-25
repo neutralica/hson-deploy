@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { writeSync } from "node:fs";
+import { realpathSync, writeSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform, version as nodeVersion } from "node:process";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 import WebSocket from "ws";
 import type { BrowserWebSocketConstructor } from "../hson-demo2/src/app/demos/tests/hosted-client/browser-websocket-socket";
@@ -295,8 +296,23 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
 type DeploymentCaptureCommandDependencies = Readonly<{
   capture?: typeof capture_deployment_tests;
   writeOutput?: (fd: 1 | 2, value: string) => void;
-  terminate?: (exitCode: number) => void;
 }>;
+
+const DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES = Symbol.for("terminal-gothic-deploy.capture-command-dependencies");
+
+function injected_capture_command(): typeof capture_deployment_tests | undefined {
+  const dependencies = (globalThis as typeof globalThis & { [DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES]?: Pick<DeploymentCaptureCommandDependencies, "capture"> })[DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES];
+  return dependencies?.capture;
+}
+
+export function is_deployment_capture_main(moduleUrl: string, argvEntry: string | undefined): boolean {
+  if (argvEntry === undefined) return false;
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(resolve(argvEntry));
+  } catch {
+    return false;
+  }
+}
 
 function write_terminal_output(fd: 1 | 2, value: string): void {
   const bytes = Buffer.from(value);
@@ -311,22 +327,26 @@ function write_terminal_output(fd: 1 | 2, value: string): void {
 export async function run_deployment_capture_command(
   arguments_: readonly string[],
   dependencies: DeploymentCaptureCommandDependencies = {},
-): Promise<void> {
-  const captureCommand = dependencies.capture ?? capture_deployment_tests;
+): Promise<0 | 1> {
+  const captureCommand = dependencies.capture ?? injected_capture_command() ?? capture_deployment_tests;
   const writeOutput = dependencies.writeOutput ?? write_terminal_output;
-  const terminate = dependencies.terminate ?? ((exitCode) => process.exit(exitCode));
   try {
     const stages = parse_capture_stages(arguments_);
     const candidate = await captureCommand(stages === undefined ? {} : { stages });
     writeOutput(1, `${candidate}\n`);
-    terminate(0);
+    return 0;
   } catch (error) {
     const cause = error instanceof Error ? error : new Error(String(error));
     writeOutput(2, `${cause.stack ?? cause.message}\n`);
-    terminate(1);
+    return 1;
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  void run_deployment_capture_command(process.argv.slice(2));
+if (is_deployment_capture_main(import.meta.url, process.argv[1])) {
+  let exitCode: 0 | 1 = 1;
+  try {
+    exitCode = await run_deployment_capture_command(process.argv.slice(2));
+  } finally {
+    process.exit(exitCode);
+  }
 }
