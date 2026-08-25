@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform, version as nodeVersion } from "node:process";
 import { basename, dirname, join, resolve } from "node:path";
@@ -19,7 +20,11 @@ const ROOT = resolve(import.meta.dirname, "..");
 const DEMO = join(ROOT, "hson-demo2");
 type Name = "semantic" | "browser" | "certification";
 type Selection = Readonly<{ name: Name; ids: readonly string[] }>;
-export type DeploymentCaptureOptions = Readonly<{ stages?: readonly Name[] }>;
+export type DeploymentCaptureOptions = Readonly<{
+  stages?: readonly Name[];
+  /** Private focused-verification seam; every override must be a discovered member of its stage. */
+  selectionOverrides?: Readonly<Partial<Record<Name, readonly string[]>>>;
+}>;
 type EvidenceClassification = Readonly<{ selfContained: number; transientIrrelevant: number; transientRequired: number }>;
 type DeploymentState = Readonly<{ hsonDeployCommit: string; hsonDemo2Gitlink: string; hsonLiveGitlink: string; intrastructureGitlink: string }>;
 
@@ -205,12 +210,21 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
   if (requestedStages?.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) {
     throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
   }
-  const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined;
+  const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let cleanupPersisted = false; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined; let captureFailure: unknown; let cleanupFailure: unknown;
   try {
     before = await state(stateSupervisor);
     stage = "server-start";
     process.chdir(DEMO); server = await start_hosted_test_server({ host: "127.0.0.1", port: 0, shutdownTimeoutMs: 15_000, retainRichDiagnostics: true, timeline: observe, authorityLifecycle: { maxTowlRooms: 8, towlIdleMs: 30_000, maxHostedReports: 8, hostedReportRetentionMs: 3_600_000, sweepIntervalMs: 30_000 } });
-    stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: observe }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); const activeSelections = requestedStages === undefined ? selections : selections.filter((selected) => requestedStages.includes(selected.name)); selection = Object.fromEntries(activeSelections.map((selected) => [selected.name, { idCount: selected.ids.length, ids: selected.ids }])); const runs: Record<string, unknown> = {};
+    stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: observe }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); const stagedSelections = requestedStages === undefined ? selections : selections.filter((selected) => requestedStages.includes(selected.name)); const activeSelections = stagedSelections.map((selected) => {
+      const override = options.selectionOverrides?.[selected.name];
+      if (override === undefined) return selected;
+      const ids = unique(override, `${selected.name}-override`);
+      if (ids.length === 0) throw new Error(`DEPLOYMENT_CAPTURE_EMPTY_SELECTION_OVERRIDE:${selected.name}`);
+      const allowed = new Set(selected.ids);
+      const invalid = ids.find((id) => !allowed.has(id));
+      if (invalid !== undefined) throw new Error(`DEPLOYMENT_CAPTURE_SELECTION_OVERRIDE_INVALID:${selected.name}:${invalid}`);
+      return Object.freeze({ name: selected.name, ids });
+    }); selection = Object.fromEntries(activeSelections.map((selected) => [selected.name, { idCount: selected.ids.length, ids: selected.ids }])); const runs: Record<string, unknown> = {};
     for (const selected of activeSelections) {
       const captured = await capture_deployment_selection(selected, capture, adapter, (value) => { stage = value; });
       latestReport = captured.report;
@@ -218,19 +232,91 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
     }
     stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs }); return candidate;
   } catch (error) {
+    captureFailure = error;
     const cause = error instanceof Error ? error : new Error(String(error));
     await atomic(join(candidate, "capture-diagnostics.json"), { failedStage: stage, selection, observedStages, timeline, browserCorpus: failed_report_summary(latestReport), error: { name: cause.name, message: cause.message, stack: cause.stack } });
     throw error;
   } finally {
     try {
-      stage = "cleanup"; adapter?.dispose(); runtime?.dispose(); if (server) { const clientSockets = await wait_for_client_close(server); await server.stop(); const browser = server.browserMetrics?.(); if (browser) { assert.equal(browser.activeProcesses, 0); assert.equal(browser.activeJourneys, 0); assert.equal(browser.retainedArtifactRoots, 0); } cleanup = { clientSockets, browser }; } process.chdir(cwd); if (before !== undefined) assert.deepEqual(await state(stateSupervisor), before); if (cleanup !== undefined) await atomic(join(capture, "capture-cleanup.json"), cleanup);
+      stage = "cleanup-client-close";
+      adapter?.dispose();
+      runtime?.dispose();
+      if (server) {
+        const clientSockets = await wait_for_client_close(server);
+        stage = "cleanup-server-stop";
+        await server.stop();
+        const browser = server.browserMetrics?.();
+        if (browser) {
+          assert.equal(browser.activeProcesses, 0);
+          assert.equal(browser.activeJourneys, 0);
+          assert.equal(browser.retainedArtifactRoots, 0);
+        }
+        cleanup = { clientSockets, browser };
+      }
+      process.chdir(cwd);
+      stage = "cleanup-repository-state";
+      if (before !== undefined) assert.deepEqual(await state(stateSupervisor), before);
+      if (cleanup !== undefined) {
+        stage = "cleanup-persistence";
+        await atomic(join(capture, "capture-cleanup.json"), cleanup);
+        cleanupPersisted = true;
+      }
+    } catch (error) {
+      cleanupFailure = error;
+      throw error;
     } finally {
+      const stateChildren = stateSupervisor.metrics().activeChildren;
       stateSupervisor.dispose();
       process.chdir(cwd);
+      const terminal = Object.freeze({
+        status: captureFailure === undefined && cleanupFailure === undefined && stateChildren === 0 ? "passed" : "failed",
+        completedAt: new Date().toISOString(),
+        lastCheckpoint: cleanupPersisted ? "cleanup-persisted" : stage,
+        externalOwnership: Object.freeze({
+          stateChildren,
+          clientSockets: cleanup === undefined ? undefined : (cleanup.clientSockets as { total: number }).total,
+          browserProcesses: cleanup === undefined ? undefined : (cleanup.browser as { activeProcesses?: number } | undefined)?.activeProcesses,
+          browserJourneys: cleanup === undefined ? undefined : (cleanup.browser as { activeJourneys?: number } | undefined)?.activeJourneys,
+        }),
+        activeResourcesBeforeCommandExit: process.getActiveResourcesInfo(),
+      });
+      try {
+        await atomic(join(capture, "capture-terminal.json"), terminal);
+      } catch (terminalWriteError) {
+        if (captureFailure === undefined && cleanupFailure === undefined) throw terminalWriteError;
+      }
+      if (stateChildren !== 0 && captureFailure === undefined && cleanupFailure === undefined) {
+        throw new Error(`DEPLOYMENT_CAPTURE_STATE_CHILDREN_REMAIN:${stateChildren}`);
+      }
     }
   }
 }
+
+type DeploymentCaptureCommandDependencies = Readonly<{
+  capture?: typeof capture_deployment_tests;
+  writeOutput?: (fd: 1 | 2, value: string) => void;
+  terminate?: (exitCode: number) => void;
+}>;
+
+export async function run_deployment_capture_command(
+  arguments_: readonly string[],
+  dependencies: DeploymentCaptureCommandDependencies = {},
+): Promise<void> {
+  const captureCommand = dependencies.capture ?? capture_deployment_tests;
+  const writeOutput = dependencies.writeOutput ?? ((fd, value) => { writeSync(fd, value); });
+  const terminate = dependencies.terminate ?? ((exitCode) => process.exit(exitCode));
+  try {
+    const stages = parse_capture_stages(arguments_);
+    const candidate = await captureCommand(stages === undefined ? {} : { stages });
+    writeOutput(1, `${candidate}\n`);
+    terminate(0);
+  } catch (error) {
+    const cause = error instanceof Error ? error : new Error(String(error));
+    writeOutput(2, `${cause.stack ?? cause.message}\n`);
+    terminate(1);
+  }
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const stages = parse_capture_stages(process.argv.slice(2));
-  capture_deployment_tests(stages === undefined ? {} : { stages }).then((candidate) => console.log(candidate));
+  void run_deployment_capture_command(process.argv.slice(2));
 }

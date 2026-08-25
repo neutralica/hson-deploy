@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { capture_deployment_selection, capture_deployment_tests } from "../capture-deployment-tests.mjs";
 import { create_external_library_launcher_service } from "../../hson-demo2/tests/harness/runtimes/node/external-library-launchers";
@@ -158,6 +161,9 @@ test("capture preflight bounds and diagnoses an exited direct state child with i
     const diagnostics = JSON.parse(await readFile(join(candidate, "capture-diagnostics.json"), "utf8"));
     assert.equal(diagnostics.failedStage, "preflight-state");
     assert.match(diagnostics.error.message, /PROCESS_STDIO_SETTLEMENT_FAILED/);
+    const terminal = JSON.parse(await readFile(join(candidate, "capture", "capture-terminal.json"), "utf8"));
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.externalOwnership.stateChildren, 0);
   } finally {
     if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
     if (priorMarker === undefined) delete process.env.CAPTURE_FAKE_GIT_MARKER; else process.env.CAPTURE_FAKE_GIT_MARKER = priorMarker;
@@ -166,5 +172,59 @@ test("capture preflight bounds and diagnoses an exited direct state child with i
     }
     if (candidate !== undefined) await rm(candidate, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("focused certification reaches terminal capture finalization after all owned execution settles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deployment-capture-orchestration-"));
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), `#!${process.execPath}\nconst args=process.argv.slice(2);if(args[0]==="ls-tree")process.stdout.write("160000 commit capture-fixture\\t"+(args[2]??"")+"\\n");else if(args[0]==="rev-parse")process.stdout.write("capture-fixture\\n");\n`);
+  await chmod(join(bin, "git"), 0o755);
+  const priorPath = process.env.PATH;
+  let candidate: string | undefined;
+  try {
+    process.env.PATH = `${bin}${delimiter}${priorPath ?? ""}`;
+    candidate = await with_watchdog(capture_deployment_tests({
+      stages: ["certification"],
+      selectionOverrides: { certification: ["verification/demo/test-node-process-supervisor"] },
+    }), 30_000);
+    const report = JSON.parse(await readFile(join(candidate, "capture", "certification.json"), "utf8"));
+    assert.equal(report.run.status, "passed");
+    assert.deepEqual(report.plan.selectionIds, ["verification/demo/test-node-process-supervisor"]);
+    assert.equal(report.suiteRuns[0]?.status, "pass");
+    const cleanup = JSON.parse(await readFile(join(candidate, "capture", "capture-cleanup.json"), "utf8"));
+    assert.equal(cleanup.clientSockets.total, 0);
+    assert.equal(cleanup.browser.activeProcesses, 0);
+    assert.equal(cleanup.browser.activeJourneys, 0);
+    const terminal = JSON.parse(await readFile(join(candidate, "capture", "capture-terminal.json"), "utf8"));
+    assert.equal(terminal.status, "passed");
+    assert.equal(terminal.lastCheckpoint, "cleanup-persisted");
+    assert.deepEqual(terminal.externalOwnership, {
+      stateChildren: 0,
+      clientSockets: 0,
+      browserProcesses: 0,
+      browserJourneys: 0,
+    });
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+    if (candidate !== undefined) await rm(candidate, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture CLI makes settled pass and fail outcomes process-terminal despite a referenced handle", async () => {
+  const moduleUrl = pathToFileURL(resolve(DEPLOYMENT_ROOT, "scripts/capture-deployment-tests.mts")).href;
+  for (const fixture of [{ failure: false, exitCode: 0 }, { failure: true, exitCode: 1 }]) {
+    const source = `setInterval(()=>{},60_000);const m=await import(${JSON.stringify(moduleUrl)});await m.run_deployment_capture_command([], {capture:async()=>{${fixture.failure ? "throw new Error('fixture failure')" : "return '/tmp/capture-terminal-fixture'"}},writeOutput(){}});`;
+    const child = spawn(process.execPath, ["--import=tsx", "--input-type=module", "--eval", source], {
+      cwd: DEPLOYMENT_ROOT,
+      stdio: "ignore",
+    });
+    const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
+    assert.equal(signal, null);
+    assert.equal(code, fixture.exitCode);
+    assert.ok(child.pid !== undefined);
+    await wait_for_process_absence(child.pid);
   }
 });
