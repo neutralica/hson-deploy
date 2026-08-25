@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform, version as nodeVersion } from "node:process";
 import { basename, dirname, join, resolve } from "node:path";
@@ -13,6 +12,7 @@ import type { HostedTestReport } from "../hson-demo2/src/shared/hosted-tests/hos
 import type { TestExecutorDiscovery } from "../hson-demo2/src/shared/testing/test-discovery-contract";
 import type { HostedTestTimelineEvent } from "../hson-demo2/src/shared/hosted-tests/hosted-test-timeline";
 import { start_hosted_test_server } from "../hson-demo2/tests/harness/runtimes/node/server/hosted-test-server";
+import { create_node_process_supervisor, type NodeProcessSupervisor } from "../hson-demo2/tests/harness/runtimes/node/node-process-supervisor";
 import { assert_exact_selected_results } from "./test-evidence/selection-accounting.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -21,18 +21,38 @@ type Name = "semantic" | "browser" | "certification";
 type Selection = Readonly<{ name: Name; ids: readonly string[] }>;
 export type DeploymentCaptureOptions = Readonly<{ stages?: readonly Name[] }>;
 type EvidenceClassification = Readonly<{ selfContained: number; transientIrrelevant: number; transientRequired: number }>;
+type DeploymentState = Readonly<{ hsonDeployCommit: string; hsonDemo2Gitlink: string; hsonLiveGitlink: string; intrastructureGitlink: string }>;
 
-function git(args: readonly string[], cwd = ROOT): string { return execFileSync("git", args, { cwd, encoding: "utf8" }).trim(); }
-function state() {
-  if (git(["status", "--porcelain"]) !== "") throw new Error("DEPLOYMENT_CAPTURE_PARENT_DIRTY");
+const CAPTURE_STATE_COMMAND_TIMEOUT_MS = 30_000;
+
+function create_capture_state_supervisor(): NodeProcessSupervisor {
+  return create_node_process_supervisor({
+    stdoutLimitBytes: 16 * 1024 * 1024,
+    stderrLimitBytes: 1024 * 1024,
+    truncationMarker: "<DEPLOYMENT_CAPTURE_STATE_OUTPUT_TRUNCATED>",
+    terminationGraceMs: 1_000,
+  });
+}
+
+async function git(supervisor: NodeProcessSupervisor, args: readonly string[], cwd = ROOT): Promise<string> {
+  const result = await supervisor.start({ cwd, command: "git", args, environment: {}, timeoutMs: CAPTURE_STATE_COMMAND_TIMEOUT_MS }).result;
+  if (!result.ok) {
+    const detail = [result.spawnError, result.timedOut ? "timed out" : "", result.stderr].filter(Boolean).join("\n");
+    throw new Error(`DEPLOYMENT_CAPTURE_STATE_COMMAND_FAILED:git ${args.join(" ")}${detail === "" ? "" : `\n${detail}`}`);
+  }
+  return result.stdout.trim();
+}
+
+async function state(supervisor: NodeProcessSupervisor): Promise<DeploymentState> {
+  if (await git(supervisor, ["status", "--porcelain"]) !== "") throw new Error("DEPLOYMENT_CAPTURE_PARENT_DIRTY");
   const links: Record<string, string> = {};
   for (const path of ["hson-demo2", "hson-live", "intrastructure"]) {
-    const expected = git(["ls-tree", "HEAD", path]).split(/\s+/)[2];
-    const actual = git(["rev-parse", "HEAD"], join(ROOT, path));
-    if (expected !== actual || git(["status", "--porcelain"], join(ROOT, path)) !== "") throw new Error(`DEPLOYMENT_CAPTURE_SUBMODULE_INVALID:${path}`);
+    const expected = (await git(supervisor, ["ls-tree", "HEAD", path])).split(/\s+/)[2];
+    const actual = await git(supervisor, ["rev-parse", "HEAD"], join(ROOT, path));
+    if (expected !== actual || await git(supervisor, ["status", "--porcelain"], join(ROOT, path)) !== "") throw new Error(`DEPLOYMENT_CAPTURE_SUBMODULE_INVALID:${path}`);
     links[path] = actual;
   }
-  return Object.freeze({ hsonDeployCommit: git(["rev-parse", "HEAD"]), hsonDemo2Gitlink: links["hson-demo2"], hsonLiveGitlink: links["hson-live"], intrastructureGitlink: links.intrastructure });
+  return Object.freeze({ hsonDeployCommit: await git(supervisor, ["rev-parse", "HEAD"]), hsonDemo2Gitlink: links["hson-demo2"], hsonLiveGitlink: links["hson-live"], intrastructureGitlink: links.intrastructure });
 }
 function unique<T extends string>(ids: readonly T[], name: string) { if (new Set(ids).size !== ids.length) throw new Error(`DEPLOYMENT_CAPTURE_DUPLICATE:${name}`); return Object.freeze([...ids]); }
 export function derive_selections(discovery: TestExecutorDiscovery): readonly Selection[] {
@@ -135,22 +155,80 @@ export function parse_capture_stages(arguments_: readonly string[]): readonly Na
   if (stages.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
   return Object.freeze(stages);
 }
+
+type CaptureSelectionAdapter = Readonly<{
+  start_selected(selectionIds: readonly string[]): Promise<any>;
+  capture(): HostedTestReport | undefined;
+}>;
+
+export async function capture_deployment_selection(
+  selected: Selection,
+  capture: string,
+  adapter: CaptureSelectionAdapter,
+  observeStage: (stage: string) => void = () => undefined,
+): Promise<Readonly<{ report: HostedTestReport; run: Record<string, unknown> }>> {
+  observeStage(`${selected.name}:association`);
+  const result = await adapter.start_selected(selected.ids);
+  observeStage(`${selected.name}:validation`);
+  const report = adapter.capture();
+  if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selected.name}`);
+  const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport;
+  validate(selected.name, selected.ids, snapshot, result);
+  const evidence = evidence_classification(snapshot);
+  observeStage(`${selected.name}:atomic-write`);
+  const reportFile = `${selected.name}.json`;
+  const reportPath = join(capture, reportFile);
+  const rawBytes = await atomic(reportPath, snapshot);
+  const revalidated = await revalidate(reportPath);
+  assert.deepEqual(revalidated, snapshot, "atomically written report must independently revalidate");
+  return Object.freeze({
+    report: snapshot,
+    run: {
+      runId: result.runId,
+      attemptId: result.attemptId,
+      reportHostId: result.reportHostId,
+      reportRev: result.reportRev,
+      clientAppliedReportRev: result.reportRev,
+      reportFile,
+      selectionCount: selected.ids.length,
+      journeyCount: selected.name === "browser" ? snapshot.suiteRuns.flatMap((suite) => suite.cases).length : undefined,
+      terminalStatus: snapshot.run.status,
+      rawBytes,
+      evidence,
+      ...(selected.name === "certification" ? { metrics: certification_metrics(snapshot, Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`)) } : {}),
+    },
+  });
+}
+
 export async function capture_deployment_tests(options: DeploymentCaptureOptions = {}) {
   const requestedStages = options.stages === undefined ? undefined : unique(options.stages, "requested-stages");
   if (requestedStages?.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) {
     throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
   }
-  const before = state(); const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); let stage = "server-start"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined;
+  const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); await mkdir(capture, { recursive: true }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined;
   try {
+    before = await state(stateSupervisor);
+    stage = "server-start";
     process.chdir(DEMO); server = await start_hosted_test_server({ host: "127.0.0.1", port: 0, shutdownTimeoutMs: 15_000, retainRichDiagnostics: true, timeline: observe, authorityLifecycle: { maxTowlRooms: 8, towlIdleMs: 30_000, maxHostedReports: 8, hostedReportRetentionMs: 3_600_000, sweepIntervalMs: 30_000 } });
     stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: observe }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); const activeSelections = requestedStages === undefined ? selections : selections.filter((selected) => requestedStages.includes(selected.name)); selection = Object.fromEntries(activeSelections.map((selected) => [selected.name, { idCount: selected.ids.length, ids: selected.ids }])); const runs: Record<string, unknown> = {};
-    for (const selected of activeSelections) { stage = `${selected.name}:association`; const result = await adapter.start_selected(selected.ids); stage = `${selected.name}:validation`; const report = adapter.capture(); if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selected.name}`); const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport; latestReport = snapshot; validate(selected.name, selected.ids, snapshot, result); const evidence = evidence_classification(snapshot); stage = `${selected.name}:atomic-write`; const reportFile = `${selected.name}.json`; const reportPath = join(capture, reportFile); const rawBytes = await atomic(reportPath, snapshot); const revalidated = await revalidate(reportPath); assert.deepEqual(revalidated, snapshot, "atomically written report must independently revalidate"); runs[selected.name] = { runId: result.runId, attemptId: result.attemptId, reportHostId: result.reportHostId, reportRev: result.reportRev, clientAppliedReportRev: result.reportRev, reportFile, selectionCount: selected.ids.length, journeyCount: selected.name === "browser" ? snapshot.suiteRuns.flatMap((suite) => suite.cases).length : undefined, terminalStatus: snapshot.run.status, rawBytes, evidence, ...(selected.name === "certification" ? { metrics: certification_metrics(snapshot, Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`)) } : {}) }; }
+    for (const selected of activeSelections) {
+      const captured = await capture_deployment_selection(selected, capture, adapter, (value) => { stage = value; });
+      latestReport = captured.report;
+      runs[selected.name] = captured.run;
+    }
     stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs }); return candidate;
   } catch (error) {
     const cause = error instanceof Error ? error : new Error(String(error));
     await atomic(join(candidate, "capture-diagnostics.json"), { failedStage: stage, selection, observedStages, timeline, browserCorpus: failed_report_summary(latestReport), error: { name: cause.name, message: cause.message, stack: cause.stack } });
     throw error;
-  } finally { stage = "cleanup"; adapter?.dispose(); runtime?.dispose(); if (server) { const clientSockets = await wait_for_client_close(server); await server.stop(); const browser = server.browserMetrics?.(); if (browser) { assert.equal(browser.activeProcesses, 0); assert.equal(browser.activeJourneys, 0); assert.equal(browser.retainedArtifactRoots, 0); } cleanup = { clientSockets, browser }; } process.chdir(cwd); assert.deepEqual(state(), before); if (cleanup !== undefined) await atomic(join(capture, "capture-cleanup.json"), cleanup); }
+  } finally {
+    try {
+      stage = "cleanup"; adapter?.dispose(); runtime?.dispose(); if (server) { const clientSockets = await wait_for_client_close(server); await server.stop(); const browser = server.browserMetrics?.(); if (browser) { assert.equal(browser.activeProcesses, 0); assert.equal(browser.activeJourneys, 0); assert.equal(browser.retainedArtifactRoots, 0); } cleanup = { clientSockets, browser }; } process.chdir(cwd); if (before !== undefined) assert.deepEqual(await state(stateSupervisor), before); if (cleanup !== undefined) await atomic(join(capture, "capture-cleanup.json"), cleanup);
+    } finally {
+      stateSupervisor.dispose();
+      process.chdir(cwd);
+    }
+  }
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
   const stages = parse_capture_stages(process.argv.slice(2));
