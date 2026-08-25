@@ -175,6 +175,63 @@ test("capture preflight bounds and diagnoses an exited direct state child with i
   }
 });
 
+test("production npm/tsx first preflight Git child is reaped and leaves a diagnosable failed candidate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deployment-capture-production-preflight-"));
+  const bin = join(root, "bin");
+  const marker = join(root, "git-child.json");
+  const preloadUrl = pathToFileURL(resolve(import.meta.dirname, "fixtures/capture-cli-command-preload.mjs")).href;
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), `#!${process.execPath}\nrequire("node:fs").writeFileSync(process.env.CAPTURE_FAKE_GIT_MARKER,JSON.stringify({pid:process.pid,args:process.argv.slice(2)}));process.stderr.write("intentional preflight failure\\n");process.exit(7);\n`);
+  await chmod(join(bin, "git"), 0o755);
+  const before = new Set(await readdir(DEPLOYMENT_WORK));
+  const child = spawn("npm", ["run", "capture:deployment-tests:certification"], {
+    cwd: DEPLOYMENT_ROOT,
+    detached: process.platform !== "win32",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preloadUrl}`].filter(Boolean).join(" "),
+      DEPLOYMENT_CAPTURE_CLI_PREFLIGHT_TIMER_ONLY: "1",
+      CAPTURE_FAKE_GIT_MARKER: marker,
+      UV_THREADPOOL_SIZE: "1",
+    },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  try {
+    const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
+    assert.equal(signal, null);
+    assert.equal(code, 1);
+    assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/);
+    assert.match(stderr, /DEPLOYMENT_CAPTURE_STATE_COMMAND_FAILED:git status --porcelain[\s\S]*intentional preflight failure/);
+    const direct = JSON.parse(await readFile(marker, "utf8")) as { pid: number; args: string[] };
+    assert.deepEqual(direct.args, ["status", "--porcelain"]);
+    await wait_for_process_absence(direct.pid);
+    const additions = (await readdir(DEPLOYMENT_WORK)).filter((entry) => entry.startsWith("capture-") && !before.has(entry));
+    assert.equal(additions.length, 1, "the failed production preflight must retain exactly one candidate");
+    const candidate = join(DEPLOYMENT_WORK, additions[0]!);
+    const preflight = JSON.parse(await readFile(join(candidate, "capture-preflight.json"), "utf8"));
+    assert.equal(preflight.status, "failed");
+    assert.equal(preflight.stage, "preflight-state");
+    const diagnostics = JSON.parse(await readFile(join(candidate, "capture-diagnostics.json"), "utf8"));
+    assert.equal(diagnostics.failedStage, "preflight-state");
+    const terminal = JSON.parse(await readFile(join(candidate, "capture", "capture-terminal.json"), "utf8"));
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.externalOwnership.stateChildren, 0);
+    await rm(candidate, { recursive: true, force: true });
+  } finally {
+    if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
+      try { if (process.platform === "win32") child.kill("SIGKILL"); else process.kill(-child.pid, "SIGKILL"); } catch { /* already exited */ }
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("focused certification reaches terminal capture finalization after all owned execution settles", async () => {
   const root = await mkdtemp(join(tmpdir(), "deployment-capture-orchestration-"));
   const bin = join(root, "bin");
@@ -251,6 +308,7 @@ test("production npm/tsx capture CLI persists, emits, and exits pass and fail ou
       ]);
       assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)), "every boundary must snapshot active resource types");
       assert.ok(checkpoints[0]!.activeResources.includes("FSReqPromise"), "terminal persistence must reproduce the live FSReqPromise boundary");
+      assert.equal(checkpoints.at(-1)!.activeResources.includes("FSReqPromise"), false, "explicit exit must occur after the FS completion callback unwinds");
       assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/, "npm must launch the production tsx command");
       assert.equal(signal, null);
       assert.equal(code, fixture.exitCode);
