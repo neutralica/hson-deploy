@@ -108,6 +108,9 @@ function evidence_classification(report: HostedTestReport): EvidenceClassificati
   return Object.freeze(classification);
 }
 function validate(name: Name, intended: readonly string[], report: HostedTestReport, result: any) {
+  if (report.run.status !== "passed") {
+    throw new Error(`DEPLOYMENT_CAPTURE_REPORT_FAILED:${name}:${JSON.stringify(failed_report_summary(report))}`);
+  }
   assert.equal(report.run.status, "passed"); assert.equal(result.ok, true); assert.equal(result.runId, report.run.id); assert.ok(result.reportHostId); assert.ok(result.reportRev !== undefined); assert.deepEqual([...report.plan.selectionIds].sort(), [...intended].sort());
   assert.deepEqual([...result.selectionIds].sort(), [...intended].sort());
   assert.equal(report.summary.fail, 0); assert.equal(report.summary.skip, 0); assert.equal(report.suiteRuns.every((suite) => suite.status === "pass"), true);
