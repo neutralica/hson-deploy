@@ -213,18 +213,39 @@ test("focused certification reaches terminal capture finalization after all owne
   }
 });
 
-test("capture CLI makes settled pass and fail outcomes process-terminal despite a referenced handle", async () => {
+test("capture CLI persists, emits, and exits settled pass and fail outcomes despite a referenced handle", async () => {
   const moduleUrl = pathToFileURL(resolve(DEPLOYMENT_ROOT, "scripts/capture-deployment-tests.mts")).href;
-  for (const fixture of [{ failure: false, exitCode: 0 }, { failure: true, exitCode: 1 }]) {
-    const source = `setInterval(()=>{},60_000);const m=await import(${JSON.stringify(moduleUrl)});await m.run_deployment_capture_command([], {capture:async()=>{${fixture.failure ? "throw new Error('fixture failure')" : "return '/tmp/capture-terminal-fixture'"}},writeOutput(){}});`;
-    const child = spawn(process.execPath, ["--import=tsx", "--input-type=module", "--eval", source], {
-      cwd: DEPLOYMENT_ROOT,
-      stdio: "ignore",
-    });
-    const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
-    assert.equal(signal, null);
-    assert.equal(code, fixture.exitCode);
-    assert.ok(child.pid !== undefined);
-    await wait_for_process_absence(child.pid);
+  const root = await mkdtemp(join(tmpdir(), "deployment-capture-cli-terminal-"));
+  try {
+    for (const fixture of [{ status: "passed", failure: false, exitCode: 0 }, { status: "failed", failure: true, exitCode: 1 }]) {
+      const candidate = join(root, fixture.status);
+      const terminalPath = join(candidate, "capture", "capture-terminal.json");
+      const source = `setInterval(()=>{},60_000);const fs=await import("node:fs");const m=await import(${JSON.stringify(moduleUrl)});await m.run_deployment_capture_command([], {capture:async()=>{fs.mkdirSync(${JSON.stringify(join(candidate, "capture"))},{recursive:true});fs.writeFileSync(${JSON.stringify(terminalPath)},JSON.stringify({status:${JSON.stringify(fixture.status)}}));${fixture.failure ? "throw new Error('fixture failure')" : `return ${JSON.stringify(candidate)}`}}});`;
+      const child = spawn(process.execPath, ["--import=tsx", "--input-type=module", "--eval", source], {
+        cwd: DEPLOYMENT_ROOT,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
+      assert.deepEqual(JSON.parse(await readFile(terminalPath, "utf8")), { status: fixture.status }, "terminal record must exist before command completion");
+      assert.equal(signal, null);
+      assert.equal(code, fixture.exitCode);
+      if (fixture.failure) {
+        assert.equal(stdout, "");
+        assert.match(stderr, /^Error: fixture failure[\s\S]*\n$/);
+      } else {
+        assert.equal(stdout, `${candidate}\n`);
+        assert.equal(stderr, "");
+      }
+      assert.ok(child.pid !== undefined);
+      await wait_for_process_absence(child.pid);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

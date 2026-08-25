@@ -298,12 +298,22 @@ type DeploymentCaptureCommandDependencies = Readonly<{
   terminate?: (exitCode: number) => void;
 }>;
 
+function write_terminal_output(fd: 1 | 2, value: string): void {
+  const bytes = Buffer.from(value);
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
+    if (written <= 0) throw new Error(`DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_INCOMPLETE:${fd}`);
+    offset += written;
+  }
+}
+
 export async function run_deployment_capture_command(
   arguments_: readonly string[],
   dependencies: DeploymentCaptureCommandDependencies = {},
 ): Promise<void> {
   const captureCommand = dependencies.capture ?? capture_deployment_tests;
-  const writeOutput = dependencies.writeOutput ?? ((fd, value) => { writeSync(fd, value); });
+  const writeOutput = dependencies.writeOutput ?? write_terminal_output;
   const terminate = dependencies.terminate ?? ((exitCode) => process.exit(exitCode));
   try {
     const stages = parse_capture_stages(arguments_);
