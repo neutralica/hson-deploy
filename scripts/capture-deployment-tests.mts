@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { realpathSync, writeSync } from "node:fs";
+import { readFileSync, realpathSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform, version as nodeVersion } from "node:process";
 import { basename, dirname, join, resolve } from "node:path";
@@ -77,6 +77,12 @@ export function derive_selections(discovery: TestExecutorDiscovery): readonly Se
   return Object.freeze([Object.freeze({ name: "semantic" as const, ids: unique(semantic, "semantic") }), Object.freeze({ name: "browser" as const, ids: unique(browser, "browser") }), Object.freeze({ name: "certification" as const, ids: unique(certification, "certification") })]);
 }
 async function atomic(path: string, value: unknown) { const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`); const temp = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`); await writeFile(temp, bytes, { flag: "wx" }); JSON.parse(await readFile(temp, "utf8")); await rename(temp, path); return bytes.byteLength; }
+function atomic_sync(path: string, value: unknown) { const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`); const temp = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`); writeFileSync(temp, bytes, { flag: "wx" }); JSON.parse(readFileSync(temp, "utf8")); renameSync(temp, path); return bytes.byteLength; }
+function persist_capture_terminal(path: string, value: unknown): number {
+  const bytes = atomic_sync(path, value);
+  record_command_checkpoint("terminal-file-written", injected_command_dependencies().checkpoint);
+  return bytes;
+}
 async function revalidate(path: string): Promise<HostedTestReport> { return JSON.parse(await readFile(path, "utf8")) as HostedTestReport; }
 async function wait_for_client_close(server: Awaited<ReturnType<typeof start_hosted_test_server>>): Promise<ReturnType<typeof server.connectionSnapshot>> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -231,7 +237,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       latestReport = captured.report;
       runs[selected.name] = captured.run;
     }
-    stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs }); return candidate;
+    stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs });
   } catch (error) {
     captureFailure = error;
     const cause = error instanceof Error ? error : new Error(String(error));
@@ -282,7 +288,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
         activeResourcesBeforeCommandExit: process.getActiveResourcesInfo(),
       });
       try {
-        await atomic(join(capture, "capture-terminal.json"), terminal);
+        persist_capture_terminal(join(capture, "capture-terminal.json"), terminal);
       } catch (terminalWriteError) {
         if (captureFailure === undefined && cleanupFailure === undefined) throw terminalWriteError;
       }
@@ -291,18 +297,36 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       }
     }
   }
+  return candidate;
 }
 
 type DeploymentCaptureCommandDependencies = Readonly<{
   capture?: typeof capture_deployment_tests;
   writeOutput?: (fd: 1 | 2, value: string) => void;
+  checkpoint?: (checkpoint: DeploymentCaptureCommandCheckpoint) => void;
+}>;
+
+type DeploymentCaptureCommandCheckpointName =
+  | "terminal-file-written"
+  | "capture-function-resolved"
+  | "capture-function-rejected"
+  | "final-result-emission-begins"
+  | "final-result-emission-completes"
+  | "command-result-resolved"
+  | "process-exit-reached";
+type DeploymentCaptureCommandCheckpoint = Readonly<{
+  name: DeploymentCaptureCommandCheckpointName;
+  activeResources: readonly string[];
 }>;
 
 const DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES = Symbol.for("terminal-gothic-deploy.capture-command-dependencies");
 
-function injected_capture_command(): typeof capture_deployment_tests | undefined {
-  const dependencies = (globalThis as typeof globalThis & { [DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES]?: Pick<DeploymentCaptureCommandDependencies, "capture"> })[DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES];
-  return dependencies?.capture;
+function injected_command_dependencies(): Pick<DeploymentCaptureCommandDependencies, "capture" | "checkpoint"> {
+  return (globalThis as typeof globalThis & { [DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES]?: Pick<DeploymentCaptureCommandDependencies, "capture" | "checkpoint"> })[DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES] ?? {};
+}
+
+function record_command_checkpoint(name: DeploymentCaptureCommandCheckpointName, checkpoint?: DeploymentCaptureCommandDependencies["checkpoint"]): void {
+  checkpoint?.(Object.freeze({ name, activeResources: Object.freeze(process.getActiveResourcesInfo()) }));
 }
 
 export function is_deployment_capture_main(moduleUrl: string, argvEntry: string | undefined): boolean {
@@ -328,16 +352,24 @@ export async function run_deployment_capture_command(
   arguments_: readonly string[],
   dependencies: DeploymentCaptureCommandDependencies = {},
 ): Promise<0 | 1> {
-  const captureCommand = dependencies.capture ?? injected_capture_command() ?? capture_deployment_tests;
+  const injectedDependencies = injected_command_dependencies();
+  const captureCommand = dependencies.capture ?? injectedDependencies.capture ?? capture_deployment_tests;
   const writeOutput = dependencies.writeOutput ?? write_terminal_output;
+  const checkpoint = dependencies.checkpoint ?? injectedDependencies.checkpoint;
   try {
     const stages = parse_capture_stages(arguments_);
     const candidate = await captureCommand(stages === undefined ? {} : { stages });
+    record_command_checkpoint("capture-function-resolved", checkpoint);
+    record_command_checkpoint("final-result-emission-begins", checkpoint);
     writeOutput(1, `${candidate}\n`);
+    record_command_checkpoint("final-result-emission-completes", checkpoint);
     return 0;
   } catch (error) {
+    record_command_checkpoint("capture-function-rejected", checkpoint);
     const cause = error instanceof Error ? error : new Error(String(error));
+    record_command_checkpoint("final-result-emission-begins", checkpoint);
     writeOutput(2, `${cause.stack ?? cause.message}\n`);
+    record_command_checkpoint("final-result-emission-completes", checkpoint);
     return 1;
   }
 }
@@ -346,7 +378,9 @@ if (is_deployment_capture_main(import.meta.url, process.argv[1])) {
   let exitCode: 0 | 1 = 1;
   try {
     exitCode = await run_deployment_capture_command(process.argv.slice(2));
+    record_command_checkpoint("command-result-resolved", injected_command_dependencies().checkpoint);
   } finally {
+    record_command_checkpoint("process-exit-reached", injected_command_dependencies().checkpoint);
     process.exit(exitCode);
   }
 }

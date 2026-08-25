@@ -220,6 +220,7 @@ test("production npm/tsx capture CLI persists, emits, and exits pass and fail ou
     for (const fixture of [{ status: "passed", exitCode: 0 }, { status: "failed", exitCode: 1 }]) {
       const candidate = join(root, fixture.status);
       const terminalPath = join(candidate, "capture", "capture-terminal.json");
+      const tracePath = join(root, `${fixture.status}-checkpoints.jsonl`);
       const child = spawn("npm", ["run", "capture:deployment-tests:certification"], {
         cwd: DEPLOYMENT_ROOT,
         stdio: ["ignore", "pipe", "pipe"],
@@ -228,6 +229,7 @@ test("production npm/tsx capture CLI persists, emits, and exits pass and fail ou
           NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preloadUrl}`].filter(Boolean).join(" "),
           DEPLOYMENT_CAPTURE_CLI_FIXTURE_CANDIDATE: candidate,
           DEPLOYMENT_CAPTURE_CLI_FIXTURE_STATUS: fixture.status,
+          DEPLOYMENT_CAPTURE_CLI_FIXTURE_TRACE: tracePath,
         },
       });
       let stdout = "";
@@ -238,6 +240,17 @@ test("production npm/tsx capture CLI persists, emits, and exits pass and fail ou
       child.stderr.on("data", (chunk: string) => { stderr += chunk; });
       const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
       assert.deepEqual(JSON.parse(await readFile(terminalPath, "utf8")), { status: fixture.status, lastCheckpoint: "fixture-terminal-persisted" }, "terminal record must exist before command completion");
+      const checkpoints = (await readFile(tracePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { name: string; activeResources: string[] });
+      assert.deepEqual(checkpoints.map(({ name }) => name), [
+        "terminal-file-written",
+        fixture.status === "passed" ? "capture-function-resolved" : "capture-function-rejected",
+        "final-result-emission-begins",
+        "final-result-emission-completes",
+        "command-result-resolved",
+        "process-exit-reached",
+      ]);
+      assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)), "every boundary must snapshot active resource types");
+      assert.ok(checkpoints[0]!.activeResources.includes("FSReqPromise"), "terminal persistence must reproduce the live FSReqPromise boundary");
       assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/, "npm must launch the production tsx command");
       assert.equal(signal, null);
       assert.equal(code, fixture.exitCode);
