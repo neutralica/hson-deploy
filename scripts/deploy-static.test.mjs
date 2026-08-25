@@ -2,6 +2,21 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execute_static_deploy, PAGES_BRANCH, PAGES_PROJECT, STATIC_DIRECTORY } from "./deploy-static.mjs";
 
+const OBSERVED_WRANGLER_PROJECTS = [
+  {
+    "Project Name": "hson-deploy",
+    "Project Domains": "hson-deploy.pages.dev, hson.terminalgothic.com, terminal-gothic.com, terminalgothic.com",
+    "Git Provider": "Yes",
+    "Last Modified": "1 hour ago",
+  },
+  {
+    "Project Name": "spp-llc",
+    "Project Domains": "spp-llc.pages.dev, spp.terminalgothic.com",
+    "Git Provider": "Yes",
+    "Last Modified": "2 months ago",
+  },
+];
+
 function authority() {
   return {
     artifact: "/fixture/hson-deploy/static-production",
@@ -12,7 +27,7 @@ function authority() {
   };
 }
 
-function successful_runner(calls, projects = [{ name: PAGES_PROJECT }]) {
+function successful_runner(calls, projects = OBSERVED_WRANGLER_PROJECTS) {
   return (command, arguments_, options) => {
     calls.push({ command, arguments_, options });
     if (command === "wrangler" && arguments_.join(" ") === "pages project list --json") return JSON.stringify(projects);
@@ -51,9 +66,20 @@ test("provider target guard refuses deployment when the expected Pages project i
   const calls = [];
   assert.throws(() => execute_static_deploy({
     deploymentRoot: "/fixture/hson-deploy",
-    run: successful_runner(calls, [{ name: "another-project" }]),
+    run: successful_runner(calls, [{ "Project Name": "another-project" }]),
     resolveVerification: authority,
     environment: {},
-  }), /expected hson-deploy/);
+  }), /expected hson-deploy; available projects: another-project/);
+  assert.equal(calls.filter(({ arguments_ }) => arguments_.includes("deploy")).length, 0);
+});
+
+test("provider target guard refuses Wrangler display rows without a project name", () => {
+  const calls = [];
+  assert.throws(() => execute_static_deploy({
+    deploymentRoot: "/fixture/hson-deploy",
+    run: successful_runner(calls, [{ "Project Domains": "another-project.pages.dev" }]),
+    resolveVerification: authority,
+    environment: {},
+  }), /expected hson-deploy; available projects: \(none\)/);
   assert.equal(calls.filter(({ arguments_ }) => arguments_.includes("deploy")).length, 0);
 });

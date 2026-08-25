@@ -26,7 +26,7 @@ function parse_json(output, label) {
 }
 
 function project_names(projects) {
-  return projects.map((project) => project?.name ?? project?.project_name).filter((name) => typeof name === "string");
+  return projects.map((project) => project?.name ?? project?.project_name ?? project?.["Project Name"]).filter((name) => typeof name === "string");
 }
 
 export function execute_static_deploy(options = {}) {
