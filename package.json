@@ -34,6 +34,7 @@
     "test:test-evidence": "./node_modules/.bin/tsx --test scripts/test-evidence/*.test.mts",
     "pack": "npm -w hson-demo2 run pack",
     "certify": "npm -w hson-demo2 run certify",
+    "status:cert": "node scripts/status-certification.mjs",
     "artifact:location": "npm -w hson-demo2 run artifact:location",
     "test:certified-package-boundary": "node --test scripts/certified-package-boundary.test.mjs",
     "verify": "npm run verify:runtime && npm run verify:workspace && npm run verify:submodules",
