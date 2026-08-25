@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { assert_exact_selected_results } from "./selection-accounting.mjs";
 
 export const CATEGORIES = Object.freeze(["semantic", "browser", "certification"] as const);
 export const NORMAL_CATEGORIES = Object.freeze(["semantic", "browser"] as const);
@@ -48,15 +49,25 @@ function capture_directory(candidate: string): string {
   return basename(absolute) === "capture" ? absolute : join(absolute, "capture");
 }
 
+function validate_cleanup_snapshot(cleanup: JsonObject, label: string): void {
+  assert.equal(cleanup.clientSockets?.total, 0, `TEST_EVIDENCE_CAPTURE_SOCKETS_REMAIN:${label}`);
+  assert.equal(cleanup.clientSockets?.hostedTests?.total, 0, `TEST_EVIDENCE_CAPTURE_HOSTED_SOCKETS_REMAIN:${label}`);
+  assert.equal(cleanup.clientSockets?.towl, 0, `TEST_EVIDENCE_CAPTURE_TOWL_SOCKETS_REMAIN:${label}`);
+  assert.equal(cleanup.clientSockets?.circuitVerification, 0, `TEST_EVIDENCE_CAPTURE_CIRCUIT_SOCKETS_REMAIN:${label}`);
+  assert.equal(cleanup.browser?.activeProcesses, 0, `TEST_EVIDENCE_CAPTURE_BROWSER_PROCESSES_REMAIN:${label}`);
+  assert.equal(cleanup.browser?.activeJourneys, 0, `TEST_EVIDENCE_CAPTURE_BROWSER_JOURNEYS_REMAIN:${label}`);
+  assert.equal(cleanup.browser?.retainedArtifactRoots, 0, `TEST_EVIDENCE_CAPTURE_BROWSER_ROOTS_REMAIN:${label}`);
+  assert.equal(cleanup.browser?.forcedTerminations, 0, `TEST_EVIDENCE_CAPTURE_FORCED_TERMINATIONS:${label}`);
+}
+
 function validate_cleanup(cleanup: JsonObject): void {
-  assert.equal(cleanup.clientSockets?.total, 0, "TEST_EVIDENCE_CAPTURE_SOCKETS_REMAIN");
-  assert.equal(cleanup.clientSockets?.hostedTests?.total, 0, "TEST_EVIDENCE_CAPTURE_HOSTED_SOCKETS_REMAIN");
-  assert.equal(cleanup.clientSockets?.towl, 0, "TEST_EVIDENCE_CAPTURE_TOWL_SOCKETS_REMAIN");
-  assert.equal(cleanup.clientSockets?.circuitVerification, 0, "TEST_EVIDENCE_CAPTURE_CIRCUIT_SOCKETS_REMAIN");
-  assert.equal(cleanup.browser?.activeProcesses, 0, "TEST_EVIDENCE_CAPTURE_BROWSER_PROCESSES_REMAIN");
-  assert.equal(cleanup.browser?.activeJourneys, 0, "TEST_EVIDENCE_CAPTURE_BROWSER_JOURNEYS_REMAIN");
-  assert.equal(cleanup.browser?.retainedArtifactRoots, 0, "TEST_EVIDENCE_CAPTURE_BROWSER_ROOTS_REMAIN");
-  assert.equal(cleanup.browser?.forcedTerminations, 0, "TEST_EVIDENCE_CAPTURE_FORCED_TERMINATIONS");
+  if (cleanup.captures === undefined) {
+    validate_cleanup_snapshot(cleanup, "capture");
+    return;
+  }
+  assert.deepEqual(Object.keys(cleanup.captures).sort(), ["certification", "normal"], "TEST_EVIDENCE_CAPTURE_CLEANUP_SET_MISMATCH");
+  validate_cleanup_snapshot(cleanup.captures.normal, "normal");
+  validate_cleanup_snapshot(cleanup.captures.certification, "certification");
 }
 
 function assert_unique(values: readonly string[], label: string): void {
@@ -78,8 +89,12 @@ function validate_report(category: Category, report: JsonObject, metadata: JsonO
   assert.equal(report.summary?.fail, 0, `TEST_EVIDENCE_REPORT_FAILURES:${category}`);
   assert.equal(report.summary?.skip, 0, `TEST_EVIDENCE_REPORT_SKIPS:${category}`);
   assert.equal(report.suiteRuns?.every((suite: JsonObject) => suite.status === "pass"), true, `TEST_EVIDENCE_SUITE_FAILURE:${category}`);
-  assert.deepEqual([...report.plan.selectionIds].sort(), [...metadata.selection[category].ids].sort(), `TEST_EVIDENCE_SELECTION_MISMATCH:${category}`);
-  assert.equal(run.selectionCount, metadata.selection[category].idCount, `TEST_EVIDENCE_SELECTION_COUNT_MISMATCH:${category}`);
+  const selectedIds = metadata.selection?.[category]?.ids;
+  assert.equal(Array.isArray(selectedIds), true, `TEST_EVIDENCE_SELECTION_MISSING:${category}`);
+  assert.equal(metadata.selection[category].idCount, selectedIds.length, `TEST_EVIDENCE_SELECTION_DECLARED_COUNT_MISMATCH:${category}`);
+  assert.equal(run.selectionCount, selectedIds.length, `TEST_EVIDENCE_SELECTION_COUNT_MISMATCH:${category}`);
+  assert.deepEqual([...report.plan.selectionIds].sort(), [...selectedIds].sort(), `TEST_EVIDENCE_SELECTION_MISMATCH:${category}`);
+  assert_exact_selected_results(selectedIds, report.suiteRuns, category);
   assert_unique(report.suiteRuns.map((suite: JsonObject) => suite.id), `${category.toUpperCase()}_SUITE`);
   assert_unique(report.suiteRuns.flatMap((suite: JsonObject) => suite.cases.map((item: JsonObject) => item.id)), `${category.toUpperCase()}_CASE`);
   for (const suite of report.suiteRuns) {
@@ -114,22 +129,11 @@ function validate_accounting(reports: Partial<Record<Category, JsonObject>>, met
   assert.equal(metadata.runs.browser.journeyCount, browserCases.length, "TEST_EVIDENCE_BROWSER_JOURNEY_ACCOUNTING");
 
   const certification = reports.certification;
-  if (certification !== undefined) {
-    assert.equal(certification.suiteRuns.length, 57, "TEST_EVIDENCE_CERTIFICATION_DENOMINATOR");
-    assert.equal(metadata.selection.certification.idCount, 57, "TEST_EVIDENCE_CERTIFICATION_SELECTION_DENOMINATOR");
-    assert.deepEqual(metadata.selection.certification.h2, { h2b: 10, h2c: 11, h2d: 7, remaining: 0 }, "TEST_EVIDENCE_H2_ACCOUNTING");
-    const h2Cleanup = certification.suiteRuns.flatMap((suite: JsonObject) => suite.evidence)
-      .filter((entry: JsonObject) => entry.content.includes('"h2Cleanup":"removed"'));
-    assert.equal(h2Cleanup.length, 28, "TEST_EVIDENCE_H2_WORKSPACE_CLEANUP_ACCOUNTING");
-  }
-  const certificationCount = certification === undefined ? 0 : 57;
+  const certificationCount = certification?.suiteRuns.length ?? 0;
   return Object.freeze({
     semantic: { canonical: semantic.summary, opaqueChecks: { total: opaqueDeclared, pass: opaqueChecks } },
     browserJourneys: { total: browserCases.length, pass: browserCases.length },
     certifications: { total: certificationCount, pass: certificationCount },
-    h2: certification === undefined
-      ? { b: 0, c: 0, d: 0, remaining: 0, workspacesRemoved: 0, workspacesRemaining: 0 }
-      : { b: 10, c: 11, d: 7, remaining: 0, workspacesRemoved: 28, workspacesRemaining: 0 },
     inspectionReruns: 0,
   });
 }
@@ -314,7 +318,9 @@ export async function materialize_test_evidence(captureCandidate: string, option
         reportPath: reportRecords[category].path,
         reportBytes: reportRecords[category].rawBytes,
         reportSha256: reportRecords[category].sha256,
-        terminalSummary: category === "certification" ? { status: "passed", certifications: 57 } : { status: "passed", ...source.reports[category]!.summary },
+        terminalSummary: category === "certification"
+          ? { status: "passed", certifications: source.reports[category]!.suiteRuns.length }
+          : { status: "passed", ...source.reports[category]!.summary },
       }])),
       accounting: source.accounting,
       artifactSet,

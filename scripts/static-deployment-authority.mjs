@@ -5,6 +5,7 @@ import { verify_static_production_artifact } from "./verify-static-production-ar
 
 const EVIDENCE_ROOT_PATTERN = /^test-evidence\/([0-9a-f]{40})$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
+export const EXPECTED_CERTIFICATION_AUTHORITY = "npm run capture:deployment-tests:certification";
 
 function read_json(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); }
@@ -81,6 +82,9 @@ export function inspect_reusable_certified_artifact(options = {}) {
   const currentCommit = (options.currentCommit ?? git_head)(deploymentRoot);
   if (receipt?.schemaVersion !== 1 || receipt.kind !== "hson-tests-explorer-certification" || receipt.certified !== true) {
     return Object.freeze({ reusable: false, reason: "certification receipt missing or invalid" });
+  }
+  if (receipt.authority !== EXPECTED_CERTIFICATION_AUTHORITY) {
+    return Object.freeze({ reusable: false, reason: "certification receipt names a stale or unknown authority" });
   }
   if (receipt.deploymentCommit !== currentCommit || receipt.evidenceRoot !== `/test-evidence/${currentCommit}`) {
     return Object.freeze({ reusable: false, reason: "certified source revision does not match current deployment revision" });

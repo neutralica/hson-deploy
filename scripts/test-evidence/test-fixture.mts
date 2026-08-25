@@ -35,7 +35,7 @@ function report(runId: string, selectionIds: string[], suites: any[]) {
   };
 }
 
-export async function make_capture(root: string, options: { longCaseId?: boolean } = {}) {
+export async function make_capture(root: string, options: { longCaseId?: boolean; certificationCount?: number } = {}) {
   const capture = join(root, "candidate", "capture");
   await mkdir(capture, { recursive: true });
   const semanticCaseId = options.longCaseId ? "x".repeat(300) : "semantic/suite::case one";
@@ -47,7 +47,8 @@ export async function make_capture(root: string, options: { longCaseId?: boolean
   const browserEvidence = evidence("browser:e1", "browser attachment");
   const browserCase = { id: "browser/suite::journey", caseId: "journey", title: "journey", order: 0, status: "pass", ...lifecycle(), err: null, diagnostic: null, evidenceRefs: [browserEvidence.id], executorId: "fixture" };
   const browserSuites = [suite("browser/suite", "browser-journeys", [browserCase], [browserEvidence])];
-  const certificationSuites = Array.from({ length: 57 }, (_, index) => suite(`cert/${index}`, "certification-aggregate", [], [evidence(`cert/${index}:e1`, index < 28 ? '{"h2Cleanup":"removed"}' : `certification ${index}`)]));
+  const certificationSuites = Array.from({ length: options.certificationCount ?? 3 }, (_, index) =>
+    suite(`cert/${index}`, "certification-aggregate", [], [evidence(`cert/${index}:e1`, `certification ${index}`)]));
   const reports: Record<string, any> = {
     semantic: report("run-semantic", [semanticCaseId, "opaque/suite"], semanticSuites),
     browser: report("run-browser", [browserCase.id], browserSuites),
@@ -66,7 +67,7 @@ export async function make_capture(root: string, options: { longCaseId?: boolean
     selection: {
       semantic: { idCount: 2, ids: reports.semantic.plan.selectionIds },
       browser: { idCount: 1, ids: reports.browser.plan.selectionIds },
-      certification: { idCount: 57, ids: reports.certification.plan.selectionIds, h2: { h2b: 10, h2c: 11, h2d: 7, remaining: 0 } },
+      certification: { idCount: certificationSuites.length, ids: reports.certification.plan.selectionIds },
     },
     runs: Object.fromEntries(Object.entries(reports).map(([name, value]) => [name, {
       runId: value.run.id, attemptId: `${value.run.id}:attempt:1`, reportHostId: `host:${name}`, reportRev: 1, clientAppliedReportRev: 1,

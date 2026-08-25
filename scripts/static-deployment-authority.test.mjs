@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { inspect_reusable_certified_artifact } from "./static-deployment-authority.mjs";
+import { EXPECTED_CERTIFICATION_AUTHORITY, inspect_reusable_certified_artifact } from "./static-deployment-authority.mjs";
 
 const commit = "a".repeat(40);
 const artifactSet = "b".repeat(64);
@@ -28,7 +28,7 @@ async function fixture(receiptOverrides = {}) {
     schemaVersion: 1,
     kind: "hson-tests-explorer-certification",
     certified: true,
-    authority: "npm -w hson-demo2 run test:inclusive-library-node",
+    authority: EXPECTED_CERTIFICATION_AUTHORITY,
     evidenceRoot: `/${evidenceRoot}`,
     deploymentCommit: commit,
     evidenceArtifactSetSha256: artifactSet,
@@ -46,6 +46,11 @@ test("certified artifact reuse requires current source, evidence identity, and e
   const stale = inspect_reusable_certified_artifact({ ...valid, currentCommit: () => "c".repeat(40) });
   assert.equal(stale.reusable, false);
   assert.match(stale.reason, /source revision/);
+
+  const staleAuthority = await fixture({ authority: "npm -w hson-demo2 run test:inclusive-library-node" });
+  const rejectedAuthority = inspect_reusable_certified_artifact({ ...staleAuthority, currentCommit: () => commit });
+  assert.equal(rejectedAuthority.reusable, false);
+  assert.match(rejectedAuthority.reason, /stale or unknown authority/);
 
   const mismatched = await fixture({ evidenceArtifactSetSha256: "d".repeat(64) });
   const rejectedHash = inspect_reusable_certified_artifact({ ...mismatched, currentCommit: () => commit });

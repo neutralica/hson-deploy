@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import {
+  CERTIFICATION_AUTHORITY,
   PACK_STAGES,
   canonical_package_locations,
+  combine_certification_capture,
   execute_certification,
   execute_pack,
   resolve_deployment_root,
   write_certification_receipt,
 } from "../../hson-demo2/scripts/certified-package.mjs";
+import { EXPECTED_CERTIFICATION_AUTHORITY } from "./static-deployment-authority.mjs";
 
 const deploymentRoot = resolve(import.meta.dirname, "..");
 const applicationRoot = resolve(deploymentRoot, "..", "hson-demo2");
@@ -21,6 +24,7 @@ function successful_runner(calls) {
     calls.push({ command, arguments_, cwd: options.cwd, env: options.env });
     const invocation = arguments_.join(" ");
     if (invocation === "run capture:deployment-tests:normal") return `${join(deploymentRoot, ".deployment-work", "capture-fixture")}\n`;
+    if (invocation === "run capture:deployment-tests:certification") return `${join(deploymentRoot, ".deployment-work", "certification-fixture")}\n`;
     if (invocation.startsWith("run materialize:test-evidence --")) return `npm banner\n${JSON.stringify({
       candidate: join(deploymentRoot, ".deployment-work", "materialize-fixture"),
       publicRoot: "/test-evidence/0123456789012345678901234567890123456789",
@@ -81,11 +85,28 @@ test("a source verification failure stops before any execution or artifact gener
 test("certify runs the full integrated authority and then the exact pack flow", () => {
   const calls = [];
   const receipts = [];
-  const result = execute_certification({ deploymentRoot, run: successful_runner(calls), environment: {}, writeReceipt(packed) { receipts.push(packed); return { path: "receipt.json" }; } });
-  assert.equal(calls[0].arguments_.join(" "), "run verify");
-  assert.equal(calls[1].arguments_.join(" "), "-w hson-demo2 run test:inclusive-library-node");
-  assert.equal(calls[2].arguments_.join(" "), "run verify");
+  const result = execute_certification({
+    deploymentRoot,
+    run: successful_runner(calls),
+    environment: {},
+    combineCapture({ normalCandidate, certificationCandidate }) {
+      assert.match(certificationCandidate, /certification-fixture$/);
+      return normalCandidate;
+    },
+    writeReceipt(packed) { receipts.push(packed); return { path: "receipt.json" }; },
+  });
+  assert.deepEqual(calls.map((call) => call.arguments_.join(" ")), [
+    "run verify",
+    "run capture:deployment-tests:certification",
+    "run verify",
+    "-w hson-live run build",
+    "run verify:package-surface",
+    "run capture:deployment-tests:normal",
+    `run materialize:test-evidence -- ${join(deploymentRoot, ".deployment-work", "capture-fixture")}`,
+    "run prepare:static-production",
+  ]);
   assert.equal(calls.filter((call) => call.arguments_.includes("capture:deployment-tests:normal")).length, 1);
+  assert.equal(calls.filter((call) => call.arguments_.includes("capture:deployment-tests:certification")).length, 1);
   assert.equal(receipts.length, 1);
   assert.equal(result.certified, true);
   assert.deepEqual(result.certificationReceipt, { path: "receipt.json" });
@@ -103,7 +124,31 @@ test("certification receipt binds the authority result to the packed evidence id
   assert.equal(stored.certified, true);
   assert.equal(stored.deploymentCommit, "0123456789012345678901234567890123456789");
   assert.equal(stored.evidenceArtifactSetSha256, "a".repeat(64));
-  assert.match(stored.authority, /test:inclusive-library-node/);
+  assert.equal(CERTIFICATION_AUTHORITY, EXPECTED_CERTIFICATION_AUTHORITY);
+  assert.equal(stored.authority, EXPECTED_CERTIFICATION_AUTHORITY);
+});
+
+test("combined certification evidence retains cleanup proof from both executions", () => {
+  const root = mkdtempSync(join(tmpdir(), "hson-combined-capture-"));
+  const deployment = { hsonDeployCommit: "a", hsonDemo2Gitlink: "b", hsonLiveGitlink: "c", intrastructureGitlink: "d" };
+  const cleanup = {
+    clientSockets: { total: 0, hostedTests: { total: 0 }, towl: 0, circuitVerification: 0 },
+    browser: { activeProcesses: 0, activeJourneys: 0, retainedArtifactRoots: 0, forcedTerminations: 0 },
+  };
+  const candidate = (name, selectedStages, selection, runs) => {
+    const directory = join(root, name, "capture");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "capture-metadata.json"), JSON.stringify({ selectedStages, deployment, selection, runs }));
+    writeFileSync(join(directory, "capture-cleanup.json"), JSON.stringify(cleanup));
+    return join(root, name);
+  };
+  const normal = candidate("normal", ["semantic", "browser"], { semantic: {}, browser: {} }, { semantic: {}, browser: {} });
+  const certification = candidate("certification", ["certification"], { certification: {} }, { certification: {} });
+  writeFileSync(join(certification, "capture", "certification.json"), "{}\n");
+
+  const combined = combine_certification_capture({ deploymentRoot: root, normalCandidate: normal, certificationCandidate: certification });
+  const retained = JSON.parse(readFileSync(join(combined, "capture", "capture-cleanup.json"), "utf8"));
+  assert.deepEqual(retained, { captures: { normal: cleanup, certification: cleanup } });
 });
 
 test("application, deployment, and library entrypoints converge on one canonical location", () => {

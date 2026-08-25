@@ -12,8 +12,37 @@ async function temporary() { return mkdtemp(join(tmpdir(), "hson-evidence-")); }
 test("successful source capture validation proves terminal accounting and cleanup", async () => {
   const fixture = await make_capture(await temporary());
   const source = await validate_capture(fixture.candidate, { verifyRevisions: false });
-  assert.deepEqual(source.accounting.h2, { b: 10, c: 11, d: 7, remaining: 0, workspacesRemoved: 28, workspacesRemaining: 0 });
+  assert.deepEqual(source.accounting.certifications, { total: 3, pass: 3 });
   assert.equal(source.accounting.inspectionReruns, 0);
+});
+
+test("combined capture cleanup validates both normal and certification executions", async () => {
+  const fixture = await make_capture(await temporary());
+  const cleanupPath = join(fixture.capture, "capture-cleanup.json");
+  const snapshot = JSON.parse(await readFile(cleanupPath, "utf8"));
+  await writeFile(cleanupPath, `${JSON.stringify({ captures: { normal: snapshot, certification: snapshot } }, null, 2)}\n`);
+  await validate_capture(fixture.candidate, { verifyRevisions: false });
+
+  const failed = structuredClone(snapshot);
+  failed.browser.activeProcesses = 1;
+  await writeFile(cleanupPath, `${JSON.stringify({ captures: { normal: snapshot, certification: failed } }, null, 2)}\n`);
+  await assert.rejects(validate_capture(fixture.candidate, { verifyRevisions: false }), /BROWSER_PROCESSES_REMAIN:certification/);
+});
+
+test("certification accounting derives from the exact selected result set", async () => {
+  const fixture = await make_capture(await temporary(), { certificationCount: 4 });
+  const source = await validate_capture(fixture.candidate, { verifyRevisions: false });
+  assert.deepEqual(source.accounting.certifications, { total: 4, pass: 4 });
+
+  const reportPath = join(fixture.capture, "certification.json");
+  const report = JSON.parse(await readFile(reportPath, "utf8"));
+  report.suiteRuns[3].id = "cert/unexpected";
+  await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  const metadataPath = join(fixture.capture, "capture-metadata.json");
+  const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+  metadata.runs.certification.rawBytes = (await stat(reportPath)).size;
+  await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+  await assert.rejects(validate_capture(fixture.candidate, { verifyRevisions: false }), /TEST_SELECTION_RESULT_SET_MISMATCH:certification/);
 });
 
 test("failed and incomplete captures reject before evidence is read", async () => {
@@ -57,9 +86,9 @@ test("index and lazy artifacts exactly partition retained case and suite evidenc
   const result = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
   assert.equal(result.verification.caseCount, 2);
   assert.equal(result.verification.caseArtifactCount, 2);
-  assert.equal(result.verification.suiteArtifactCount, 58);
-  assert.equal(result.verification.evidenceEntryCount, 59);
-  assert.equal(result.index.suites.length, 60);
+  assert.equal(result.verification.suiteArtifactCount, 4);
+  assert.equal(result.verification.evidenceEntryCount, 5);
+  assert.equal(result.index.suites.length, 6);
   assert.equal(JSON.stringify(result.index).includes("transformerArtifact"), false);
   assert.equal(JSON.stringify(result.index).includes("browser attachment"), false);
   const semantic = result.index.suites.find((entry: any) => entry.id === "semantic/suite");
