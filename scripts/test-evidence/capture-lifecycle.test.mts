@@ -326,3 +326,71 @@ test("production npm/tsx capture CLI persists, emits, and exits pass and fail ou
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("production npm/tsx certification exits after a real validation failure", async () => {
+  const preloadUrl = pathToFileURL(resolve(import.meta.dirname, "fixtures/capture-cli-command-preload.mjs")).href;
+  const root = await mkdtemp(join(tmpdir(), "deployment-capture-cli-real-validation-"));
+  const bin = join(root, "bin");
+  const tracePath = join(root, "checkpoints.jsonl");
+  await mkdir(bin);
+  await writeFile(join(bin, "git"), `#!${process.execPath}\nconst args=process.argv.slice(2);if(args[0]==="ls-tree")process.stdout.write("160000 commit capture-fixture\\t"+(args[2]??"")+"\\n");else if(args[0]==="rev-parse")process.stdout.write("capture-fixture\\n");\n`);
+  await chmod(join(bin, "git"), 0o755);
+  const before = new Set(await readdir(DEPLOYMENT_WORK));
+  const child = spawn("npm", ["run", "capture:deployment-tests:certification"], {
+    cwd: DEPLOYMENT_ROOT,
+    detached: process.platform !== "win32",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preloadUrl}`].filter(Boolean).join(" "),
+      DEPLOYMENT_CAPTURE_CLI_REAL_VALIDATION_FAILURE: "1",
+      DEPLOYMENT_CAPTURE_CLI_FIXTURE_TRACE: tracePath,
+    },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  let candidate: string | undefined;
+  try {
+    const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 45_000);
+    assert.equal(signal, null);
+    assert.equal(code, 1);
+    assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/);
+    assert.match(stderr, /Expected values to be strictly deep-equal/);
+    assert.match(stderr, /verification\/demo\/test-presentation-cleanup-node/);
+    assert.doesNotMatch(stdout, /\.deployment-work\/capture-[^\n]+\n/);
+    const additions = (await readdir(DEPLOYMENT_WORK)).filter((entry) => entry.startsWith("capture-") && !before.has(entry));
+    assert.equal(additions.length, 1, "the real validation failure must retain exactly one capture candidate");
+    candidate = join(DEPLOYMENT_WORK, additions[0]!);
+    const diagnostics = JSON.parse(await readFile(join(candidate, "capture-diagnostics.json"), "utf8"));
+    assert.equal(diagnostics.failedStage, "certification:validation");
+    const cleanup = JSON.parse(await readFile(join(candidate, "capture", "capture-cleanup.json"), "utf8"));
+    assert.equal(cleanup.clientSockets.total, 0);
+    const terminal = JSON.parse(await readFile(join(candidate, "capture", "capture-terminal.json"), "utf8"));
+    assert.equal(terminal.status, "failed");
+    assert.equal(terminal.lastCheckpoint, "cleanup-persisted");
+    const checkpoints = (await readFile(tracePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { name: string; activeResources: string[] });
+    assert.deepEqual(checkpoints.map(({ name }) => name), [
+      "terminal-file-written",
+      "capture-function-rejected",
+      "final-result-emission-begins",
+      "final-result-emission-completes",
+      "command-result-resolved",
+      "process-exit-reached",
+    ]);
+    assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)));
+    assert.equal(checkpoints[0]!.activeResources.includes("FSReqPromise"), false, "terminal persistence must not run inside an async filesystem completion");
+    assert.ok(child.pid !== undefined);
+    await wait_for_process_absence(child.pid);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null && child.pid !== undefined) {
+      try { if (process.platform === "win32") child.kill("SIGKILL"); else process.kill(-child.pid, "SIGKILL"); } catch { /* already exited */ }
+    }
+    if (candidate !== undefined) await rm(candidate, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});

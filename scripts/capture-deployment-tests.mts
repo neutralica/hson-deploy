@@ -25,6 +25,8 @@ export type DeploymentCaptureOptions = Readonly<{
   stages?: readonly Name[];
   /** Private focused-verification seam; every override must be a discovered member of its stage. */
   selectionOverrides?: Readonly<Partial<Record<Name, readonly string[]>>>;
+  /** Private regression seam; validates a real run against a different discovered selection. */
+  validationExpectedSelectionOverrides?: Readonly<Partial<Record<Name, readonly string[]>>>;
 }>;
 type EvidenceClassification = Readonly<{ selfContained: number; transientIrrelevant: number; transientRequired: number }>;
 type DeploymentState = Readonly<{ hsonDeployCommit: string; hsonDemo2Gitlink: string; hsonLiveGitlink: string; intrastructureGitlink: string }>;
@@ -188,6 +190,7 @@ export async function capture_deployment_selection(
   capture: string,
   adapter: CaptureSelectionAdapter,
   observeStage: (stage: string) => void = () => undefined,
+  validationExpectedIds: readonly string[] = selected.ids,
 ): Promise<Readonly<{ report: HostedTestReport; run: Record<string, unknown> }>> {
   observeStage(`${selected.name}:association`);
   const result = await adapter.start_selected(selected.ids);
@@ -195,7 +198,7 @@ export async function capture_deployment_selection(
   const report = adapter.capture();
   if (!report) throw new Error(`DEPLOYMENT_CAPTURE_MISSING:${selected.name}`);
   const snapshot = JSON.parse(JSON.stringify(report)) as HostedTestReport;
-  validate(selected.name, selected.ids, snapshot, result);
+  validate(selected.name, validationExpectedIds, snapshot, result);
   const evidence = evidence_classification(snapshot);
   observeStage(`${selected.name}:atomic-write`);
   const reportFile = `${selected.name}.json`;
@@ -245,7 +248,16 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       return Object.freeze({ name: selected.name, ids });
     }); selection = Object.fromEntries(activeSelections.map((selected) => [selected.name, { idCount: selected.ids.length, ids: selected.ids }])); const runs: Record<string, unknown> = {};
     for (const selected of activeSelections) {
-      const captured = await capture_deployment_selection(selected, capture, adapter, (value) => { stage = value; });
+      const validationExpectedOverride = options.validationExpectedSelectionOverrides?.[selected.name];
+      const validationExpectedIds = validationExpectedOverride === undefined
+        ? selected.ids
+        : unique(validationExpectedOverride, `${selected.name}-validation-expected-override`);
+      const allowedValidationIds = new Set(selections.find((candidate) => candidate.name === selected.name)?.ids ?? []);
+      const invalidValidationId = validationExpectedIds.find((id) => !allowedValidationIds.has(id));
+      if (validationExpectedIds.length === 0 || invalidValidationId !== undefined) {
+        throw new Error(`DEPLOYMENT_CAPTURE_VALIDATION_EXPECTED_OVERRIDE_INVALID:${selected.name}:${invalidValidationId ?? "empty"}`);
+      }
+      const captured = await capture_deployment_selection(selected, capture, adapter, (value) => { stage = value; }, validationExpectedIds);
       latestReport = captured.report;
       runs[selected.name] = captured.run;
     }
@@ -278,7 +290,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       if (before !== undefined) assert.deepEqual(await state(stateSupervisor), before);
       if (cleanup !== undefined) {
         stage = "cleanup-persistence";
-        await atomic(join(capture, "capture-cleanup.json"), cleanup);
+        atomic_sync(join(capture, "capture-cleanup.json"), cleanup);
         cleanupPersisted = true;
       }
     } catch (error) {
@@ -319,6 +331,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
 
 type DeploymentCaptureCommandDependencies = Readonly<{
   capture?: typeof capture_deployment_tests;
+  captureOptions?: Omit<DeploymentCaptureOptions, "stages">;
   writeOutput?: (fd: 1 | 2, value: string) => void;
   checkpoint?: (checkpoint: DeploymentCaptureCommandCheckpoint) => void;
 }>;
@@ -338,8 +351,8 @@ type DeploymentCaptureCommandCheckpoint = Readonly<{
 
 const DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES = Symbol.for("terminal-gothic-deploy.capture-command-dependencies");
 
-function injected_command_dependencies(): Pick<DeploymentCaptureCommandDependencies, "capture" | "checkpoint"> {
-  return (globalThis as typeof globalThis & { [DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES]?: Pick<DeploymentCaptureCommandDependencies, "capture" | "checkpoint"> })[DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES] ?? {};
+function injected_command_dependencies(): Pick<DeploymentCaptureCommandDependencies, "capture" | "captureOptions" | "checkpoint"> {
+  return (globalThis as typeof globalThis & { [DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES]?: Pick<DeploymentCaptureCommandDependencies, "capture" | "captureOptions" | "checkpoint"> })[DEPLOYMENT_CAPTURE_COMMAND_DEPENDENCIES] ?? {};
 }
 
 function record_command_checkpoint(name: DeploymentCaptureCommandCheckpointName, checkpoint?: DeploymentCaptureCommandDependencies["checkpoint"]): void {
@@ -371,11 +384,12 @@ export async function run_deployment_capture_command(
 ): Promise<0 | 1> {
   const injectedDependencies = injected_command_dependencies();
   const captureCommand = dependencies.capture ?? injectedDependencies.capture ?? capture_deployment_tests;
+  const captureOptions = dependencies.captureOptions ?? injectedDependencies.captureOptions ?? {};
   const writeOutput = dependencies.writeOutput ?? write_terminal_output;
   const checkpoint = dependencies.checkpoint ?? injectedDependencies.checkpoint;
   try {
     const stages = parse_capture_stages(arguments_);
-    const candidate = await captureCommand(stages === undefined ? {} : { stages });
+    const candidate = await captureCommand({ ...captureOptions, ...(stages === undefined ? {} : { stages }) });
     record_command_checkpoint("capture-function-resolved", checkpoint);
     record_command_checkpoint("final-result-emission-begins", checkpoint);
     writeOutput(1, `${candidate}\n`);
