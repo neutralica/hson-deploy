@@ -34,6 +34,8 @@ type DeploymentState = Readonly<{ hsonDeployCommit: string; hsonDemo2Gitlink: st
 
 const CAPTURE_STATE_COMMAND_TIMEOUT_MS = 30_000;
 const CAPTURE_STATE_DISPOSAL_TIMEOUT_MS = 3_000;
+export const DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_LIMIT_BYTES = 16 * 1024;
+const DEPLOYMENT_CAPTURE_TERMINAL_TRUNCATION = "\n<DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_TRUNCATED>\n";
 const INTERNAL_CLI_TRACE_ENABLED = process.env.DEPLOYMENT_CAPTURE_INTERNAL_CLI_TRACE === "1";
 let internalCliTrace: { path: string; sequence: number } | undefined;
 
@@ -169,6 +171,35 @@ function failed_report_summary(report: HostedTestReport | undefined) {
       failingCases: suite.cases.filter((test) => test.status !== "pass").map((test) => ({ id: test.id, status: test.status, err: test.err, errors: test.errors, evidenceRefs: test.evidenceRefs })),
     })),
   };
+}
+
+function failing_suite_ids_from_error(error: Error): readonly string[] {
+  const marker = "DEPLOYMENT_CAPTURE_REPORT_FAILED:";
+  if (!error.message.startsWith(marker)) return Object.freeze([]);
+  const jsonStart = error.message.indexOf(":{", marker.length);
+  if (jsonStart < 0) return Object.freeze([]);
+  try {
+    const summary = JSON.parse(error.message.slice(jsonStart + 1)) as {
+      failingSuites?: readonly Readonly<{ id?: unknown }>[];
+    };
+    return Object.freeze((summary.failingSuites ?? []).flatMap((suite) =>
+      typeof suite.id === "string" ? [suite.id] : []
+    ));
+  } catch {
+    return Object.freeze([]);
+  }
+}
+
+class DeploymentCaptureFailure extends Error {
+  readonly candidate: string;
+  readonly failingSuiteIds: readonly string[];
+
+  constructor(candidate: string, cause: Error) {
+    super(cause.message, { cause });
+    this.name = cause.name;
+    this.candidate = candidate;
+    this.failingSuiteIds = failing_suite_ids_from_error(cause);
+  }
 }
 function evidence_classification(report: HostedTestReport): EvidenceClassification {
   const evidence = report.suiteRuns.flatMap((suite) => suite.evidence);
@@ -322,7 +353,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
     const cause = error instanceof Error ? error : new Error(String(error));
     if (!preflightCompleted) atomic_sync(preflightPath, { captureId, status: "failed", startedAt: preflightStartedAt, completedAt: new Date().toISOString(), stage: "preflight-state", error: { name: cause.name, message: cause.message } });
     atomic_sync(join(candidate, "capture-diagnostics.json"), { captureId, failedStage: stage, selection, observedStages, timeline, browserCorpus: failed_report_summary(latestReport), error: { name: cause.name, message: cause.message, stack: cause.stack } });
-    throw error;
+    throw new DeploymentCaptureFailure(candidate, cause);
   } finally {
     try {
       stage = "cleanup-client-close";
@@ -431,14 +462,52 @@ export function is_deployment_capture_main(moduleUrl: string, argvEntry: string 
   }
 }
 
-function write_terminal_output(fd: 1 | 2, value: string): void {
+function bounded_terminal_output(value: string): string {
   const bytes = Buffer.from(value);
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
-    if (written <= 0) throw new Error(`DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_INCOMPLETE:${fd}`);
-    offset += written;
+  if (bytes.byteLength <= DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_LIMIT_BYTES) return value;
+  const marker = Buffer.from(DEPLOYMENT_CAPTURE_TERMINAL_TRUNCATION);
+  const retained = bytes.subarray(0, DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_LIMIT_BYTES - marker.byteLength);
+  return Buffer.concat([retained, marker]).toString("utf8");
+}
+
+export function write_terminal_output(fd: 1 | 2, value: string): void {
+  const bytes = Buffer.from(bounded_terminal_output(value));
+  try {
+    // Terminal output is operator convenience, not evidence or completion
+    // authority. One bounded attempt prevents backpressure from delaying the
+    // already-durable capture result or replacing it with EAGAIN.
+    writeSync(fd, bytes, 0, bytes.byteLength);
+  } catch {
+    // The supervisor and retained capture remain authoritative.
   }
+}
+
+export function format_deployment_capture_failure(
+  error: unknown,
+  certification: boolean,
+): string {
+  const cause = error instanceof Error ? error : new Error(String(error));
+  const candidate = cause instanceof DeploymentCaptureFailure
+    ? cause.candidate
+    : process.env.HSON_CERTIFICATION_CAPTURE_CANDIDATE;
+  const failingSuiteIds = cause instanceof DeploymentCaptureFailure
+    ? cause.failingSuiteIds
+    : failing_suite_ids_from_error(cause);
+  const lines = [certification ? "CERTIFICATION FAILED" : "DEPLOYMENT CAPTURE FAILED", ""];
+  if (failingSuiteIds.length > 0) {
+    lines.push(`Failed suites: ${failingSuiteIds.length}`);
+    lines.push(...failingSuiteIds.map((id) => `- ${id}`));
+    lines.push("");
+  }
+  if (candidate !== undefined) {
+    lines.push("Retained diagnostics:");
+    lines.push(join(candidate, "capture-diagnostics.json"));
+  } else if (failingSuiteIds.length > 0) {
+    lines.push("Retained diagnostics: unavailable");
+  } else {
+    lines.push(`Failure: ${cause.message.split("\n", 1)[0] ?? cause.name}`);
+  }
+  return bounded_terminal_output(`${lines.join("\n")}\n`);
 }
 
 export async function run_deployment_capture_command(
@@ -450,6 +519,8 @@ export async function run_deployment_capture_command(
   const captureOptions = dependencies.captureOptions ?? injectedDependencies.captureOptions ?? {};
   const writeOutput = dependencies.writeOutput ?? write_terminal_output;
   const checkpoint = dependencies.checkpoint ?? injectedDependencies.checkpoint;
+  const certification = arguments_.includes("--certification-only")
+    || arguments_.includes("--stage=certification");
   try {
     const stages = parse_capture_stages(arguments_);
     const candidate = await captureCommand({ ...captureOptions, ...(stages === undefined ? {} : { stages }) });
@@ -458,7 +529,7 @@ export async function run_deployment_capture_command(
     trace_internal_cli("run-command-resolved");
     trace_internal_cli("final-output-begin");
     record_command_checkpoint("final-result-emission-begins", checkpoint);
-    writeOutput(1, `${candidate}\n`);
+    try { writeOutput(1, bounded_terminal_output(`${candidate}\n`)); } catch { /* non-authoritative terminal */ }
     trace_internal_cli("final-output-complete");
     record_command_checkpoint("final-result-emission-completes", checkpoint);
     return 0;
@@ -468,7 +539,7 @@ export async function run_deployment_capture_command(
     trace_internal_cli("run-command-resolved");
     trace_internal_cli("final-output-begin");
     record_command_checkpoint("final-result-emission-begins", checkpoint);
-    writeOutput(2, `${cause.stack ?? cause.message}\n`);
+    try { writeOutput(2, format_deployment_capture_failure(cause, certification)); } catch { /* non-authoritative terminal */ }
     trace_internal_cli("final-output-complete");
     record_command_checkpoint("final-result-emission-completes", checkpoint);
     return 1;

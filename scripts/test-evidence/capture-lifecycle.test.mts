@@ -303,8 +303,9 @@ test("production npm/supervisor certification exits after a real validation fail
     assert.equal(signal, null);
     assert.equal(code, 1);
     assert.match(stdout, /> node --import=tsx scripts\/supervise-certification-capture\.mts\n/);
-    assert.match(stderr, /Expected values to be strictly deep-equal/);
-    assert.match(stderr, /verification\/demo\/test-presentation-cleanup-node/);
+    assert.match(stderr, /^CERTIFICATION FAILED\n\nRetained diagnostics:\n/);
+    assert.doesNotMatch(stderr, /Expected values to be strictly deep-equal/);
+    assert.doesNotMatch(stderr, /verification\/demo\/test-presentation-cleanup-node/);
     assert.doesNotMatch(stdout, /\.deployment-work\/capture-[^\n]+\n/);
     const additions = (await readdir(DEPLOYMENT_WORK)).filter((entry) => entry.startsWith("capture-") && !before.has(entry));
     assert.equal(additions.length, 1, "the real validation failure must retain exactly one capture candidate");
