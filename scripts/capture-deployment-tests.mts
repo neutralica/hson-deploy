@@ -19,6 +19,7 @@ import { assert_exact_selected_results } from "./test-evidence/selection-account
 
 const ROOT = resolve(import.meta.dirname, "..");
 const DEMO = join(ROOT, "hson-demo2");
+const WORK_ROOT = join(ROOT, ".deployment-work");
 type Name = "semantic" | "browser" | "certification";
 type Selection = Readonly<{ name: Name; ids: readonly string[] }>;
 export type DeploymentCaptureOptions = Readonly<{
@@ -36,6 +37,27 @@ const CAPTURE_STATE_DISPOSAL_TIMEOUT_MS = 3_000;
 const INTERNAL_CLI_TRACE_ENABLED = process.env.DEPLOYMENT_CAPTURE_INTERNAL_CLI_TRACE === "1";
 let internalCliTrace: { path: string; sequence: number } | undefined;
 
+function capture_identity(): Readonly<{ captureId: string; candidate: string }> {
+  const captureId = process.env.HSON_CERTIFICATION_CAPTURE_ID ?? crypto.randomUUID();
+  if (!/^[0-9a-f-]{36}$/i.test(captureId)) throw new Error("DEPLOYMENT_CAPTURE_ID_INVALID");
+  const configured = process.env.HSON_CERTIFICATION_CAPTURE_CANDIDATE;
+  const candidate = resolve(configured ?? join(WORK_ROOT, `capture-${Date.now().toString(36)}-${captureId}`));
+  if (dirname(candidate) !== WORK_ROOT || !basename(candidate).endsWith(captureId)) throw new Error("DEPLOYMENT_CAPTURE_CANDIDATE_INVALID");
+  mkdirSync(WORK_ROOT, { recursive: true });
+  mkdirSync(candidate);
+  const capture = join(candidate, "capture");
+  mkdirSync(capture);
+  return Object.freeze({ captureId, candidate });
+}
+
+function empty_cleanup(captureId: string): Record<string, unknown> {
+  return {
+    captureId,
+    clientSockets: { total: 0, hostedTests: { total: 0 }, towl: 0, circuitVerification: 0 },
+    browser: { activeProcesses: 0, activeJourneys: 0, retainedArtifactRoots: 0, forcedTerminations: 0 },
+  };
+}
+
 type InternalCliTraceCheckpoint =
   | "capture-terminal-written"
   | "finally-complete"
@@ -43,8 +65,7 @@ type InternalCliTraceCheckpoint =
   | "run-command-resolved"
   | "main-result-received"
   | "final-output-begin"
-  | "final-output-complete"
-  | "process-exit-about-to-call";
+  | "final-output-complete";
 
 function initialize_internal_cli_trace(capture: string): void {
   if (!INTERNAL_CLI_TRACE_ENABLED) return;
@@ -264,11 +285,11 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
   if (requestedStages?.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) {
     throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
   }
-  const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); mkdirSync(capture, { recursive: true }); initialize_internal_cli_trace(capture); const preflightPath = join(candidate, "capture-preflight.json"); const preflightStartedAt = new Date().toISOString(); atomic_sync(preflightPath, { status: "started", startedAt: preflightStartedAt, stage: "preflight-state" }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let preflightCompleted = false; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let cleanupPersisted = false; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined; let captureFailure: unknown; let cleanupFailure: unknown;
+  const { captureId, candidate } = capture_identity(); const capture = join(candidate, "capture"); initialize_internal_cli_trace(capture); const preflightPath = join(candidate, "capture-preflight.json"); const preflightStartedAt = new Date().toISOString(); atomic_sync(preflightPath, { captureId, status: "started", startedAt: preflightStartedAt, stage: "preflight-state" }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let preflightCompleted = false; let sourceRevalidated = false; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> = empty_cleanup(captureId); let cleanupPersisted = false; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined; let captureFailure: unknown; let cleanupFailure: unknown;
   try {
     before = await state(stateSupervisor);
     preflightCompleted = true;
-    atomic_sync(preflightPath, { status: "passed", startedAt: preflightStartedAt, completedAt: new Date().toISOString(), stage: "preflight-state", deployment: before });
+    atomic_sync(preflightPath, { captureId, status: "passed", startedAt: preflightStartedAt, completedAt: new Date().toISOString(), stage: "preflight-state", deployment: before });
     stage = "server-start";
     process.chdir(DEMO); server = await start_hosted_test_server({ host: "127.0.0.1", port: 0, shutdownTimeoutMs: 15_000, retainRichDiagnostics: true, timeline: observe, authorityLifecycle: { maxTowlRooms: 8, towlIdleMs: 30_000, maxHostedReports: 8, hostedReportRetentionMs: 3_600_000, sweepIntervalMs: 30_000 } });
     stage = "runtime-ready"; runtime = make_remote_hosted_test_runtime({ url: server.url, environment: { DEV: true, PROD: false }, WebSocketConstructor: WebSocket as unknown as BrowserWebSocketConstructor, reconnectDelaysMs: [0, 5, 20], timeline: observe }); adapter = make_hosted_test_panel_adapter(runtime, Object.freeze({ reset() {}, ingest() {}, showInfrastructureError(message) { throw new Error(message); } })); await runtime.ready(); stage = "selection"; const discovery = await runtime.discover(); const selections = derive_selections(discovery); const stagedSelections = requestedStages === undefined ? selections : selections.filter((selected) => requestedStages.includes(selected.name)); const activeSelections = stagedSelections.map((selected) => {
@@ -295,12 +316,12 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       latestReport = captured.report;
       runs[selected.name] = captured.run;
     }
-    stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs });
+    stage = "metadata-write"; await atomic(join(capture, "capture-metadata.json"), { captureId, capturedAt: new Date().toISOString(), deployment: before, runtime: { nodeVersion, platform, architecture: arch }, selectedStages: requestedStages ?? selections.map((selected) => selected.name), selectionSource: "runtime.tests.discover catalog executionShape classification", selection, observedStages, timeline, runs });
   } catch (error) {
     captureFailure = error;
     const cause = error instanceof Error ? error : new Error(String(error));
-    if (!preflightCompleted) atomic_sync(preflightPath, { status: "failed", startedAt: preflightStartedAt, completedAt: new Date().toISOString(), stage: "preflight-state", error: { name: cause.name, message: cause.message } });
-    atomic_sync(join(candidate, "capture-diagnostics.json"), { failedStage: stage, selection, observedStages, timeline, browserCorpus: failed_report_summary(latestReport), error: { name: cause.name, message: cause.message, stack: cause.stack } });
+    if (!preflightCompleted) atomic_sync(preflightPath, { captureId, status: "failed", startedAt: preflightStartedAt, completedAt: new Date().toISOString(), stage: "preflight-state", error: { name: cause.name, message: cause.message } });
+    atomic_sync(join(candidate, "capture-diagnostics.json"), { captureId, failedStage: stage, selection, observedStages, timeline, browserCorpus: failed_report_summary(latestReport), error: { name: cause.name, message: cause.message, stack: cause.stack } });
     throw error;
   } finally {
     try {
@@ -317,16 +338,17 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
           assert.equal(browser.activeJourneys, 0);
           assert.equal(browser.retainedArtifactRoots, 0);
         }
-        cleanup = { clientSockets, browser };
+        cleanup = { captureId, clientSockets, browser };
       }
       process.chdir(cwd);
       stage = "cleanup-repository-state";
-      if (before !== undefined) assert.deepEqual(await state(stateSupervisor), before);
-      if (cleanup !== undefined) {
-        stage = "cleanup-persistence";
-        atomic_sync(join(capture, "capture-cleanup.json"), cleanup);
-        cleanupPersisted = true;
+      if (before !== undefined) {
+        assert.deepEqual(await state(stateSupervisor), before);
+        sourceRevalidated = true;
       }
+      stage = "cleanup-persistence";
+      atomic_sync(join(capture, "capture-cleanup.json"), cleanup);
+      cleanupPersisted = true;
     } catch (error) {
       cleanupFailure = error;
       throw error;
@@ -338,14 +360,20 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       const stateChildren = stateSupervisor.metrics().activeChildren;
       process.chdir(cwd);
       const terminal = Object.freeze({
-        status: captureFailure === undefined && cleanupFailure === undefined && stateSettlementFailure === undefined && stateChildrenBeforeDispose === 0 && stateChildren === 0 ? "passed" : "failed",
+        schemaVersion: 1,
+        kind: "hson-deployment-capture-terminal",
+        captureId,
+        status: captureFailure === undefined && cleanupFailure === undefined && stateSettlementFailure === undefined && stateChildrenBeforeDispose === 0 && stateChildren === 0 && sourceRevalidated ? "passed" : "failed",
         completedAt: new Date().toISOString(),
         lastCheckpoint: cleanupPersisted ? "cleanup-persisted" : stage,
+        selectedStages: requestedStages ?? Object.keys(selection ?? {}),
+        deployment: before ?? null,
+        sourceRevalidated,
         externalOwnership: Object.freeze({
           stateChildren,
-          clientSockets: cleanup === undefined ? undefined : (cleanup.clientSockets as { total: number }).total,
-          browserProcesses: cleanup === undefined ? undefined : (cleanup.browser as { activeProcesses?: number } | undefined)?.activeProcesses,
-          browserJourneys: cleanup === undefined ? undefined : (cleanup.browser as { activeJourneys?: number } | undefined)?.activeJourneys,
+          clientSockets: (cleanup.clientSockets as { total: number }).total,
+          browserProcesses: (cleanup.browser as { activeProcesses?: number }).activeProcesses,
+          browserJourneys: (cleanup.browser as { activeJourneys?: number }).activeJourneys,
         }),
         activeResourcesBeforeCommandExit: process.getActiveResourcesInfo(),
       });
@@ -378,8 +406,7 @@ type DeploymentCaptureCommandCheckpointName =
   | "capture-function-rejected"
   | "final-result-emission-begins"
   | "final-result-emission-completes"
-  | "command-result-resolved"
-  | "process-exit-reached";
+  | "command-result-resolved";
 type DeploymentCaptureCommandCheckpoint = Readonly<{
   name: DeploymentCaptureCommandCheckpointName;
   activeResources: readonly string[];
@@ -417,7 +444,7 @@ function write_terminal_output(fd: 1 | 2, value: string): void {
 export async function run_deployment_capture_command(
   arguments_: readonly string[],
   dependencies: DeploymentCaptureCommandDependencies = {},
-): Promise<Readonly<{ exitCode: 0 | 1; emit(): void }>> {
+): Promise<0 | 1> {
   const injectedDependencies = injected_command_dependencies();
   const captureCommand = dependencies.capture ?? injectedDependencies.capture ?? capture_deployment_tests;
   const captureOptions = dependencies.captureOptions ?? injectedDependencies.captureOptions ?? {};
@@ -429,30 +456,27 @@ export async function run_deployment_capture_command(
     trace_internal_cli("capture-function-resolved");
     record_command_checkpoint("capture-function-resolved", checkpoint);
     trace_internal_cli("run-command-resolved");
-    return Object.freeze({ exitCode: 0 as const, emit: () => writeOutput(1, `${candidate}\n`) });
+    trace_internal_cli("final-output-begin");
+    record_command_checkpoint("final-result-emission-begins", checkpoint);
+    writeOutput(1, `${candidate}\n`);
+    trace_internal_cli("final-output-complete");
+    record_command_checkpoint("final-result-emission-completes", checkpoint);
+    return 0;
   } catch (error) {
     record_command_checkpoint("capture-function-rejected", checkpoint);
     const cause = error instanceof Error ? error : new Error(String(error));
     trace_internal_cli("run-command-resolved");
-    return Object.freeze({ exitCode: 1 as const, emit: () => writeOutput(2, `${cause.stack ?? cause.message}\n`) });
+    trace_internal_cli("final-output-begin");
+    record_command_checkpoint("final-result-emission-begins", checkpoint);
+    writeOutput(2, `${cause.stack ?? cause.message}\n`);
+    trace_internal_cli("final-output-complete");
+    record_command_checkpoint("final-result-emission-completes", checkpoint);
+    return 1;
   }
 }
 
 if (is_deployment_capture_main(import.meta.url, process.argv[1])) {
-  let exitCode: 0 | 1 = 1;
-  try {
-    const commandResult = await run_deployment_capture_command(process.argv.slice(2));
-    exitCode = commandResult.exitCode;
-    trace_internal_cli("main-result-received");
-    record_command_checkpoint("command-result-resolved", injected_command_dependencies().checkpoint);
-    trace_internal_cli("final-output-begin");
-    record_command_checkpoint("final-result-emission-begins", injected_command_dependencies().checkpoint);
-    commandResult.emit();
-    trace_internal_cli("final-output-complete");
-    record_command_checkpoint("final-result-emission-completes", injected_command_dependencies().checkpoint);
-  } finally {
-    trace_internal_cli("process-exit-about-to-call");
-    record_command_checkpoint("process-exit-reached", injected_command_dependencies().checkpoint);
-    process.exit(exitCode);
-  }
+  process.exitCode = await run_deployment_capture_command(process.argv.slice(2));
+  trace_internal_cli("main-result-received");
+  record_command_checkpoint("command-result-resolved", injected_command_dependencies().checkpoint);
 }

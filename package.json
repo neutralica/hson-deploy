@@ -28,7 +28,7 @@
     "capture:deployment-tests:normal": "./node_modules/.bin/tsx scripts/capture-deployment-tests.mts --semantic-only --browser-only",
     "capture:deployment-tests:semantic": "./node_modules/.bin/tsx scripts/capture-deployment-tests.mts --semantic-only",
     "capture:deployment-tests:browser": "./node_modules/.bin/tsx scripts/capture-deployment-tests.mts --browser-only",
-    "capture:deployment-tests:certification": "./node_modules/.bin/tsx scripts/capture-deployment-tests.mts --certification-only",
+    "capture:deployment-tests:certification": "node --import=tsx scripts/supervise-certification-capture.mts",
     "materialize:test-evidence": "./node_modules/.bin/tsx scripts/materialize-test-evidence.mts",
     "prove:test-evidence:livehost": "./node_modules/.bin/tsx scripts/prove-test-evidence-livehost.mts",
     "test:test-evidence": "./node_modules/.bin/tsx --test scripts/test-evidence/*.test.mts",

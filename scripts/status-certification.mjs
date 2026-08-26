@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const RULE = "=".repeat(64);
 const SUBRULE = "-".repeat(64);
 const CAPTURE_COMMAND = /(?:^|[\/\s])capture-deployment-tests\.mts(?:\s|$)/;
+const CAPTURE_SUPERVISOR_COMMAND = /(?:^|[\/\s])supervise-certification-capture\.mts(?:\s|$)/;
 const CERTIFICATION_ONLY = /(?:^|\s)--certification-only(?:\s|$)/;
 const CERTIFIER_COMMAND = /(?:^|[\/\s])certified-package\.mjs\s+certify(?:\s|$)/;
 const NPM_CERTIFY_COMMAND = /(?:^|[\/\s])npm(?:\s+[^\s]+)*\s+run\s+certify(?:\s|$)/;
@@ -82,7 +83,7 @@ function descendants(pid, children) {
 }
 
 function isCapture(process) {
-  return CAPTURE_COMMAND.test(process.command) && CERTIFICATION_ONLY.test(process.command);
+  return CAPTURE_SUPERVISOR_COMMAND.test(process.command) || (CAPTURE_COMMAND.test(process.command) && CERTIFICATION_ONLY.test(process.command));
 }
 
 function isCertifier(process) {

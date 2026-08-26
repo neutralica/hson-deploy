@@ -52,6 +52,13 @@ test("no certification running reports NOT RUNNING successfully", () => {
   assert.match(renderCertificationStatus(result), /Status \.{2,} NOT RUNNING/);
 });
 
+test("the durable-terminal supervisor is itself an observable certification principal", () => {
+  const processes = [process(100, 1, "node --import=tsx scripts/supervise-certification-capture.mts")];
+  const result = analyzeCertification({ processes, captureCandidates: [], sockets: [], nowMs: NOW });
+  assert.equal(result.status, "SUSPICIOUS / QUIESCENT");
+  assert.equal(result.chain.principal.pid, 100);
+});
+
 test("unavailable process inspection never masquerades as NOT RUNNING", () => {
   const result = analyzeCertification({ processes: [], processInspectionAvailable: false, nowMs: NOW });
   assert.equal(result.status, "UNKNOWN — PROCESS INSPECTION UNAVAILABLE");

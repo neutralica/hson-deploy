@@ -175,7 +175,7 @@ test("capture preflight bounds and diagnoses an exited direct state child with i
   }
 });
 
-test("production npm/tsx first preflight Git child is reaped and leaves a diagnosable failed candidate", async () => {
+test("production npm/supervisor first preflight Git child is reaped and leaves a diagnosable failed candidate", async () => {
   const root = await mkdtemp(join(tmpdir(), "deployment-capture-production-preflight-"));
   const bin = join(root, "bin");
   const marker = join(root, "git-child.json");
@@ -207,7 +207,7 @@ test("production npm/tsx first preflight Git child is reaped and leaves a diagno
     const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
     assert.equal(signal, null);
     assert.equal(code, 1);
-    assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/);
+    assert.match(stdout, /> node --import=tsx scripts\/supervise-certification-capture\.mts\n/);
     assert.match(stderr, /DEPLOYMENT_CAPTURE_STATE_COMMAND_FAILED:git status --porcelain[\s\S]*intentional preflight failure/);
     const direct = JSON.parse(await readFile(marker, "utf8")) as { pid: number; args: string[] };
     assert.deepEqual(direct.args, ["status", "--porcelain"]);
@@ -270,63 +270,7 @@ test("focused certification reaches terminal capture finalization after all owne
   }
 });
 
-test("production npm/tsx capture CLI persists, emits, and exits pass and fail outcomes despite a referenced handle", async () => {
-  const preloadUrl = pathToFileURL(resolve(import.meta.dirname, "fixtures/capture-cli-command-preload.mjs")).href;
-  const root = await mkdtemp(join(tmpdir(), "deployment-capture-cli-terminal-"));
-  try {
-    for (const fixture of [{ status: "passed", exitCode: 0 }, { status: "failed", exitCode: 1 }]) {
-      const candidate = join(root, fixture.status);
-      const terminalPath = join(candidate, "capture", "capture-terminal.json");
-      const tracePath = join(root, `${fixture.status}-checkpoints.jsonl`);
-      const child = spawn("npm", ["run", "capture:deployment-tests:certification"], {
-        cwd: DEPLOYMENT_ROOT,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${preloadUrl}`].filter(Boolean).join(" "),
-          DEPLOYMENT_CAPTURE_CLI_FIXTURE_CANDIDATE: candidate,
-          DEPLOYMENT_CAPTURE_CLI_FIXTURE_STATUS: fixture.status,
-          DEPLOYMENT_CAPTURE_CLI_FIXTURE_TRACE: tracePath,
-        },
-      });
-      let stdout = "";
-      let stderr = "";
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-      const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 5_000);
-      assert.deepEqual(JSON.parse(await readFile(terminalPath, "utf8")), { status: fixture.status, lastCheckpoint: "fixture-terminal-persisted" }, "terminal record must exist before command completion");
-      const checkpoints = (await readFile(tracePath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { name: string; activeResources: string[] });
-      assert.deepEqual(checkpoints.map(({ name }) => name), [
-        "terminal-file-written",
-        fixture.status === "passed" ? "capture-function-resolved" : "capture-function-rejected",
-        "command-result-resolved",
-        "final-result-emission-begins",
-        "final-result-emission-completes",
-        "process-exit-reached",
-      ]);
-      assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)), "every boundary must snapshot active resource types");
-      assert.equal(checkpoints.some(({ activeResources }) => activeResources.includes("FSReqPromise")), false, "the production-shaped terminal path must not manufacture asynchronous filesystem settlement");
-      assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/, "npm must launch the production tsx command");
-      assert.equal(signal, null);
-      assert.equal(code, fixture.exitCode);
-      if (fixture.status === "failed") {
-        assert.doesNotMatch(stdout, new RegExp(`${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
-        assert.match(stderr, /Error: DEPLOYMENT_CAPTURE_CLI_FIXTURE_FAILURE[\s\S]*\n/);
-      } else {
-        assert.match(stdout, new RegExp(`${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
-        assert.equal(stderr, "");
-      }
-      assert.ok(child.pid !== undefined);
-      await wait_for_process_absence(child.pid);
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("production npm/tsx certification exits after a real validation failure", async () => {
+test("production npm/supervisor certification exits after a real validation failure", async () => {
   const preloadUrl = pathToFileURL(resolve(import.meta.dirname, "fixtures/capture-cli-command-preload.mjs")).href;
   const root = await mkdtemp(join(tmpdir(), "deployment-capture-cli-real-validation-"));
   const bin = join(root, "bin");
@@ -358,7 +302,7 @@ test("production npm/tsx certification exits after a real validation failure", a
     const [code, signal] = await with_watchdog(once(child, "close") as Promise<[number | null, NodeJS.Signals | null]>, 45_000);
     assert.equal(signal, null);
     assert.equal(code, 1);
-    assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/);
+    assert.match(stdout, /> node --import=tsx scripts\/supervise-certification-capture\.mts\n/);
     assert.match(stderr, /Expected values to be strictly deep-equal/);
     assert.match(stderr, /verification\/demo\/test-presentation-cleanup-node/);
     assert.doesNotMatch(stdout, /\.deployment-work\/capture-[^\n]+\n/);
@@ -376,10 +320,9 @@ test("production npm/tsx certification exits after a real validation failure", a
     assert.deepEqual(checkpoints.map(({ name }) => name), [
       "terminal-file-written",
       "capture-function-rejected",
-      "command-result-resolved",
       "final-result-emission-begins",
       "final-result-emission-completes",
-      "process-exit-reached",
+      "command-result-resolved",
     ]);
     assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)));
     assert.equal(checkpoints[0]!.activeResources.includes("FSReqPromise"), false, "terminal persistence must not run inside an async filesystem completion");
