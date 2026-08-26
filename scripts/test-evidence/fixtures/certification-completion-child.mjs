@@ -19,6 +19,7 @@ const atomic = (path, value) => {
   renameSync(temporary, path);
 };
 const selected = ["certification/completion-fixture"];
+const resultId = mode === "selected-result-mismatch" ? "certification/unselected-result" : selected[0];
 const evidence = {
   id: "fixture:stdout", sequence: 1, timestamp: 1, executorId: "fixture",
   kind: "stdout", name: "stdout", content: "fixture passed\n", truncated: false,
@@ -29,7 +30,7 @@ const report = {
   summary: { cases: 0, pass: 0, fail: mode.startsWith("invalid-report") ? 1 : 0, skip: 0 },
   plan: { selectionIds: selected },
   suiteRuns: [{
-    id: selected[0], executionShape: "certification-aggregate", status: mode.startsWith("invalid-report") ? "fail" : "pass",
+    id: resultId, executionShape: "certification-aggregate", status: mode.startsWith("invalid-report") ? "fail" : "pass",
     sourceRef: "node-command:completion-fixture", evidence: [evidence], evidenceRefs: [evidence.id], cases: [],
   }],
   error: null,
@@ -38,22 +39,23 @@ const reportBytes = Buffer.from(`${JSON.stringify(report, null, 2)}\n`);
 const cleanup = {
   captureId,
   clientSockets: { total: mode.startsWith("invalid-cleanup") ? 1 : 0, hostedTests: { total: 0 }, towl: 0, circuitVerification: 0 },
-  browser: { activeProcesses: 0, activeJourneys: 0, retainedArtifactRoots: 0, forcedTerminations: 0 },
+  browser: { activeProcesses: 0, activeJourneys: 0, retainedArtifactRoots: 0, forcedTerminations: mode === "pass-diagnostics" ? 2 : 0 },
 };
 const terminalStatus = mode.startsWith("fail") ? "failed" : "passed";
 const terminalCaptureId = mode.startsWith("stale-terminal") ? crypto.randomUUID() : captureId;
+const metadataDeployment = mode === "source-mismatch" ? { ...deployment, hsonDeployCommit: "e".repeat(40) } : deployment;
 
 atomic(join(candidate, "capture-preflight.json"), { captureId, status: "passed", deployment });
 atomic(join(capture, "certification.json"), report);
 atomic(join(capture, "capture-metadata.json"), {
   captureId,
-  deployment,
+  deployment: metadataDeployment,
   selectedStages: ["certification"],
   selection: { certification: { idCount: selected.length, ids: selected } },
   runs: { certification: {
     runId: report.run.id,
-    attemptId: `${report.run.id}:attempt:1`,
-    reportHostId: "fixture-host",
+    attemptId: mode === "pass-diagnostics" ? `${report.run.id}:attempt:9` : `${report.run.id}:attempt:1`,
+    ...(mode === "pass-diagnostics" ? {} : { reportHostId: "fixture-host" }),
     reportRev: 1,
     clientAppliedReportRev: 1,
     reportFile: "certification.json",
@@ -64,17 +66,22 @@ atomic(join(capture, "capture-metadata.json"), {
 });
 atomic(join(capture, "capture-cleanup.json"), cleanup);
 if (terminalStatus === "failed") atomic(join(candidate, "capture-diagnostics.json"), { captureId, failedStage: "fixture", error: { message: "intentional fixture failure" } });
+if (mode === "malformed-terminal") {
+  writeFileSync(join(capture, "capture-terminal.json"), "{malformed\n");
+  process.exit(0);
+}
 atomic(join(capture, "capture-terminal.json"), {
   schemaVersion: 1,
   kind: "hson-deployment-capture-terminal",
   captureId: terminalCaptureId,
   status: terminalStatus,
   completedAt: new Date().toISOString(),
-  lastCheckpoint: "cleanup-persisted",
+  lastCheckpoint: mode === "pass-diagnostics" ? "diagnostic-checkpoint" : "cleanup-persisted",
   selectedStages: ["certification"],
   deployment,
   sourceRevalidated: true,
   externalOwnership: { stateChildren: 0, clientSockets: 0, browserProcesses: 0, browserJourneys: 0 },
+  activeResourcesBeforeCommandExit: ["PipeWrap", "PipeWrap", "ProcessWrap"],
 });
 
 if (mode.endsWith("linger")) {

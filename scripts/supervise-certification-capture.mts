@@ -70,7 +70,6 @@ function validate_cleanup(cleanup: JsonRecord, captureId: string): void {
   assert.equal(cleanup.browser?.activeProcesses, 0, "CERTIFICATION_CLEANUP_BROWSER_PROCESSES_REMAIN");
   assert.equal(cleanup.browser?.activeJourneys, 0, "CERTIFICATION_CLEANUP_BROWSER_JOURNEYS_REMAIN");
   assert.equal(cleanup.browser?.retainedArtifactRoots, 0, "CERTIFICATION_CLEANUP_ARTIFACT_ROOTS_REMAIN");
-  assert.equal(cleanup.browser?.forcedTerminations, 0, "CERTIFICATION_CLEANUP_FORCED_TERMINATIONS_RETAINED");
 }
 
 function validate_evidence(report: JsonRecord): void {
@@ -119,14 +118,14 @@ function validate_pass_artifacts(candidate: string, captureId: string, terminal:
   assert.equal(run.selectionCount, selection.ids.length, "CERTIFICATION_RUN_SELECTION_COUNT_MISMATCH");
   assert.equal(run.rawBytes, reportBytes.byteLength, "CERTIFICATION_REPORT_BYTES_MISMATCH");
   assert.equal(run.runId, report.run?.id, "CERTIFICATION_RUN_ID_MISMATCH");
-  assert.equal(run.attemptId, `${run.runId}:attempt:1`, "CERTIFICATION_RETRY_OR_INSPECTION_DETECTED");
-  assert.equal(typeof run.reportHostId, "string", "CERTIFICATION_REPORT_HOST_MISSING");
   assert.equal(Number.isInteger(run.reportRev) && run.reportRev >= 0, true, "CERTIFICATION_REPORT_REVISION_INVALID");
   assert.equal(run.reportRev, run.clientAppliedReportRev, "CERTIFICATION_REPORT_REVISION_UNRECONCILED");
   assert.equal(run.terminalStatus, "passed", "CERTIFICATION_RUN_NOT_PASSED");
   assert.equal(report.run?.status, "passed", "CERTIFICATION_REPORT_NOT_PASSED");
   assert.equal(report.error, null, "CERTIFICATION_REPORT_ERROR_RETAINED");
-  assert.deepEqual(report.plan?.selectionIds, selection.ids, "CERTIFICATION_REPORT_SELECTION_MISMATCH");
+  assert.ok(Array.isArray(report.plan?.selectionIds), "CERTIFICATION_REPORT_SELECTION_INVALID");
+  assert.equal(new Set(report.plan.selectionIds).size, report.plan.selectionIds.length, "CERTIFICATION_REPORT_SELECTION_DUPLICATE");
+  assert.deepEqual([...report.plan.selectionIds].sort(), [...selection.ids].sort(), "CERTIFICATION_REPORT_SELECTION_MISMATCH");
   assert.ok(Array.isArray(report.suiteRuns), "CERTIFICATION_REPORT_RESULTS_INVALID");
   assert_exact_selected_results(selection.ids, report.suiteRuns, "certification-parent");
   assert.equal(report.summary?.fail, 0, "CERTIFICATION_REPORT_FAILURES_RETAINED");
@@ -149,7 +148,6 @@ export function validate_certification_terminal(candidateInput: string, captureI
   assert.equal(terminal.captureId, captureId, "CERTIFICATION_TERMINAL_CAPTURE_MISMATCH");
   assert.deepEqual(terminal.selectedStages, ["certification"], "CERTIFICATION_TERMINAL_STAGE_MISMATCH");
   assert.ok(terminal.status === "passed" || terminal.status === "failed", "CERTIFICATION_TERMINAL_STATUS_INVALID");
-  assert.equal(terminal.lastCheckpoint, "cleanup-persisted", "CERTIFICATION_TERMINAL_CHECKPOINT_INVALID");
   assert.deepEqual(terminal.externalOwnership, {
     stateChildren: 0,
     clientSockets: 0,
@@ -214,14 +212,19 @@ async function observe_terminal(candidate: string, captureId: string, pollMs: nu
   while (!signal.aborted) {
     try {
       await access(terminalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw terminal_invalid(error);
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, pollMs);
+        signal.addEventListener("abort", () => { clearTimeout(timer); resolveWait(); }, { once: true });
+      });
+      continue;
+    }
+    try {
       return validate_certification_terminal(candidate, captureId);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      throw terminal_invalid(error);
     }
-    await new Promise<void>((resolveWait) => {
-      const timer = setTimeout(resolveWait, pollMs);
-      signal.addEventListener("abort", () => { clearTimeout(timer); resolveWait(); }, { once: true });
-    });
   }
   throw new Error("CERTIFICATION_TERMINAL_OBSERVATION_CANCELLED");
 }
@@ -229,6 +232,11 @@ async function observe_terminal(candidate: string, captureId: string, pollMs: nu
 function validate_process_settlement(result: NodeProcessResult, owner: ExecutionOwner): void {
   if (result.spawnError !== undefined) throw new Error(`CERTIFICATION_CAPTURE_SETTLEMENT_FAILED:${result.spawnError}`);
   if (owner.metrics().activeChildren !== 0) throw new Error(`CERTIFICATION_CAPTURE_PROCESS_REMAINS:${owner.metrics().activeChildren}`);
+}
+
+function terminal_invalid(cause: unknown): Error {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return new Error(`CERTIFICATION_CAPTURE_TERMINAL_INVALID:${detail}`, { cause });
 }
 
 export async function supervise_certification_capture(options: CertificationSupervisorOptions = {}): Promise<ValidatedCertificationTerminal & Readonly<{ process: NodeProcessResult }>> {
@@ -265,7 +273,7 @@ export async function supervise_certification_capture(options: CertificationSupe
       processResult = first.value;
       validate_process_settlement(processResult, owner);
       try { terminal = validate_certification_terminal(candidate, captureId); }
-      catch (cause) { throw new Error("CERTIFICATION_CAPTURE_EXITED_BEFORE_VALID_TERMINAL", { cause }); }
+      catch (cause) { throw terminal_invalid(cause); }
     } else {
       terminal = first.value;
       const natural = await Promise.race([

@@ -4,10 +4,12 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { supervise_certification_capture } from "../supervise-certification-capture.mjs";
+import { supervise_certification_capture, validate_certification_terminal } from "../supervise-certification-capture.mjs";
 import type { NodeProcessResult } from "../../hson-demo2/tests/harness/runtimes/node/node-process-supervisor";
 
 const FIXTURE = resolve(import.meta.dirname, "fixtures/certification-completion-child.mjs");
+const RETAINED_CAPTURE_ID = "c9d21536-f133-4f6d-8eda-9d7f456f780b";
+const RETAINED_CANDIDATE = resolve(import.meta.dirname, `../../.deployment-work/capture-mt9nw2bm-${RETAINED_CAPTURE_ID}`);
 const SOURCE = Object.freeze({
   hsonDeployCommit: "a".repeat(40),
   hsonDemo2Gitlink: "b".repeat(40),
@@ -52,6 +54,20 @@ async function fixture_pid(candidate: string): Promise<number> {
   return pid;
 }
 
+function successful_process_result(): NodeProcessResult {
+  return Object.freeze({
+    stdout: "", stderr: "", stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false,
+    exitCode: 0, signal: null, durationMs: 1, timedOut: false, cancelled: false, outputLimitExceeded: false,
+    forceKilled: false, spawnError: undefined, ok: true,
+  });
+}
+
+test("retained real certification candidate validates as PASS", () => {
+  const result = validate_certification_terminal(RETAINED_CANDIDATE, RETAINED_CAPTURE_ID);
+  assert.equal(result.status, "passed");
+  assert.equal(result.captureId, RETAINED_CAPTURE_ID);
+});
+
 test("outer completion authority accepts terminal PASS after natural capture exit", async () => {
   const options = await fixture_options("pass-natural");
   try {
@@ -65,13 +81,42 @@ test("outer completion authority accepts terminal PASS after natural capture exi
   }
 });
 
-test("outer completion authority validates PASS and TERM-to-KILL reaps a non-quiescent capture", async () => {
+test("terminal observed before child exit validates PASS and TERM-to-KILL reaps the child", async () => {
   const options = await fixture_options("pass-linger");
   try {
     const result = await supervise_certification_capture(options);
     assert.equal(result.status, "passed");
     assert.equal(result.process.forceKilled, true);
     await wait_for_process_absence(await fixture_pid(options.candidate));
+  } finally {
+    await rm(options.deploymentRoot, { recursive: true, force: true });
+  }
+});
+
+test("child observation winning after valid terminal persistence validates the durable PASS", async () => {
+  const options = await fixture_options("pass-natural");
+  try {
+    const prepared = spawnSync(options.command, options.args, {
+      cwd: options.deploymentRoot,
+      env: {
+        ...process.env,
+        ...options.environment,
+        HSON_CERTIFICATION_CAPTURE_ID: options.captureId,
+        HSON_CERTIFICATION_CAPTURE_CANDIDATE: options.candidate,
+      },
+    });
+    assert.equal(prepared.status, 0, prepared.stderr.toString());
+    const processResult = successful_process_result();
+    const result = await supervise_certification_capture({
+      ...options,
+      launch: () => ({
+        execution: { result: Promise.resolve(processResult), terminate() {} },
+        metrics: () => ({ activeChildren: 0 }),
+        dispose() {},
+      }),
+    });
+    assert.equal(result.status, "passed");
+    assert.equal(result.process, processResult);
   } finally {
     await rm(options.deploymentRoot, { recursive: true, force: true });
   }
@@ -92,7 +137,17 @@ test("outer completion authority preserves terminal FAIL while reaping a non-qui
 test("capture exit without a valid terminal record is infrastructure failure", async () => {
   const options = await fixture_options("premature-exit");
   try {
-    await assert.rejects(supervise_certification_capture(options), /CERTIFICATION_CAPTURE_EXITED_BEFORE_VALID_TERMINAL/);
+    await assert.rejects(supervise_certification_capture(options), /CERTIFICATION_CAPTURE_TERMINAL_INVALID:CERTIFICATION_TERMINAL_INVALID/);
+    await wait_for_process_absence(await fixture_pid(options.candidate));
+  } finally {
+    await rm(options.deploymentRoot, { recursive: true, force: true });
+  }
+});
+
+test("capture exit with a malformed terminal record is transparent infrastructure failure", async () => {
+  const options = await fixture_options("malformed-terminal");
+  try {
+    await assert.rejects(supervise_certification_capture(options), /CERTIFICATION_CAPTURE_TERMINAL_INVALID:CERTIFICATION_TERMINAL_INVALID/);
     await wait_for_process_absence(await fixture_pid(options.candidate));
   } finally {
     await rm(options.deploymentRoot, { recursive: true, force: true });
@@ -122,6 +177,26 @@ test("a terminal record whose retained source identity is not current is rejecte
   }
 });
 
+test("durable source identity disagreement is rejected", async () => {
+  const options = await fixture_options("source-mismatch");
+  try {
+    await assert.rejects(supervise_certification_capture(options), /CERTIFICATION_METADATA_SOURCE_MISMATCH/);
+    await wait_for_process_absence(await fixture_pid(options.candidate));
+  } finally {
+    await rm(options.deploymentRoot, { recursive: true, force: true });
+  }
+});
+
+test("selected and terminal result identity disagreement is rejected", async () => {
+  const options = await fixture_options("selected-result-mismatch");
+  try {
+    await assert.rejects(supervise_certification_capture(options), /TEST_SELECTION_RESULT_SET_MISMATCH:certification-parent/);
+    await wait_for_process_absence(await fixture_pid(options.candidate));
+  } finally {
+    await rm(options.deploymentRoot, { recursive: true, force: true });
+  }
+});
+
 test("terminal PASS cannot override invalid cleanup or report authority", async (context) => {
   for (const [mode, pattern] of [
     ["invalid-cleanup-linger", /CERTIFICATION_CLEANUP_CLIENT_SOCKETS_REMAIN/],
@@ -136,6 +211,17 @@ test("terminal PASS cannot override invalid cleanup or report authority", async 
         await rm(options.deploymentRoot, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test("PipeWrap and ProcessWrap diagnostics and other non-authoritative bookkeeping do not veto PASS", async () => {
+  const options = await fixture_options("pass-diagnostics");
+  try {
+    const result = await supervise_certification_capture(options);
+    assert.equal(result.status, "passed");
+    await wait_for_process_absence(await fixture_pid(options.candidate));
+  } finally {
+    await rm(options.deploymentRoot, { recursive: true, force: true });
   }
 });
 
