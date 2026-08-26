@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { arch, platform, version as nodeVersion } from "node:process";
 import { basename, dirname, join, resolve } from "node:path";
@@ -33,6 +33,40 @@ type DeploymentState = Readonly<{ hsonDeployCommit: string; hsonDemo2Gitlink: st
 
 const CAPTURE_STATE_COMMAND_TIMEOUT_MS = 30_000;
 const CAPTURE_STATE_DISPOSAL_TIMEOUT_MS = 3_000;
+const INTERNAL_CLI_TRACE_ENABLED = process.env.DEPLOYMENT_CAPTURE_INTERNAL_CLI_TRACE === "1";
+let internalCliTrace: { path: string; sequence: number } | undefined;
+
+type InternalCliTraceCheckpoint =
+  | "capture-terminal-written"
+  | "finally-complete"
+  | "capture-function-resolved"
+  | "run-command-resolved"
+  | "main-result-received"
+  | "final-output-begin"
+  | "final-output-complete"
+  | "process-exit-about-to-call";
+
+function initialize_internal_cli_trace(capture: string): void {
+  if (!INTERNAL_CLI_TRACE_ENABLED) return;
+  internalCliTrace = { path: join(capture, "capture-cli-trace.jsonl"), sequence: 0 };
+}
+
+function trace_internal_cli(checkpoint: InternalCliTraceCheckpoint): void {
+  if (internalCliTrace === undefined) return;
+  const entry = Object.freeze({
+    sequence: internalCliTrace.sequence += 1,
+    checkpoint,
+    pid: process.pid,
+    timestamp: new Date().toISOString(),
+  });
+  const descriptor = openSync(internalCliTrace.path, "a", 0o600);
+  try {
+    writeSync(descriptor, `${JSON.stringify(entry)}\n`);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 function create_capture_state_supervisor(): NodeProcessSupervisor {
   return create_node_process_supervisor({
@@ -230,7 +264,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
   if (requestedStages?.some((stage) => stage !== "semantic" && stage !== "browser" && stage !== "certification")) {
     throw new Error("DEPLOYMENT_CAPTURE_UNKNOWN_STAGE");
   }
-  const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); mkdirSync(capture, { recursive: true }); const preflightPath = join(candidate, "capture-preflight.json"); const preflightStartedAt = new Date().toISOString(); atomic_sync(preflightPath, { status: "started", startedAt: preflightStartedAt, stage: "preflight-state" }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let preflightCompleted = false; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let cleanupPersisted = false; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined; let captureFailure: unknown; let cleanupFailure: unknown;
+  const candidate = join(ROOT, ".deployment-work", `capture-${Date.now().toString(36)}-${crypto.randomUUID()}`); const capture = join(candidate, "capture"); mkdirSync(capture, { recursive: true }); initialize_internal_cli_trace(capture); const preflightPath = join(candidate, "capture-preflight.json"); const preflightStartedAt = new Date().toISOString(); atomic_sync(preflightPath, { status: "started", startedAt: preflightStartedAt, stage: "preflight-state" }); const cwd = process.cwd(); const stateSupervisor = create_capture_state_supervisor(); let before: DeploymentState | undefined; let preflightCompleted = false; let stage = "preflight-state"; let server: Awaited<ReturnType<typeof start_hosted_test_server>> | undefined; let runtime: ReturnType<typeof make_remote_hosted_test_runtime> | undefined; let adapter: ReturnType<typeof make_hosted_test_panel_adapter> | undefined; const observedStages: string[] = []; const timeline: HostedTestTimelineEvent[] = []; const observe = (event: HostedTestTimelineEvent) => { timeline.push(event); const named = stage_name(event); if (named !== undefined) observedStages.push(named); }; let cleanup: Record<string, unknown> | undefined; let cleanupPersisted = false; let latestReport: HostedTestReport | undefined; let selection: Record<string, unknown> | undefined; let captureFailure: unknown; let cleanupFailure: unknown;
   try {
     before = await state(stateSupervisor);
     preflightCompleted = true;
@@ -317,6 +351,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       });
       try {
         persist_capture_terminal(join(capture, "capture-terminal.json"), terminal);
+        trace_internal_cli("capture-terminal-written");
       } catch (terminalWriteError) {
         if (captureFailure === undefined && cleanupFailure === undefined) throw terminalWriteError;
       }
@@ -326,6 +361,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
       }
     }
   }
+  trace_internal_cli("finally-complete");
   return candidate;
 }
 
@@ -381,7 +417,7 @@ function write_terminal_output(fd: 1 | 2, value: string): void {
 export async function run_deployment_capture_command(
   arguments_: readonly string[],
   dependencies: DeploymentCaptureCommandDependencies = {},
-): Promise<0 | 1> {
+): Promise<Readonly<{ exitCode: 0 | 1; emit(): void }>> {
   const injectedDependencies = injected_command_dependencies();
   const captureCommand = dependencies.capture ?? injectedDependencies.capture ?? capture_deployment_tests;
   const captureOptions = dependencies.captureOptions ?? injectedDependencies.captureOptions ?? {};
@@ -390,28 +426,32 @@ export async function run_deployment_capture_command(
   try {
     const stages = parse_capture_stages(arguments_);
     const candidate = await captureCommand({ ...captureOptions, ...(stages === undefined ? {} : { stages }) });
+    trace_internal_cli("capture-function-resolved");
     record_command_checkpoint("capture-function-resolved", checkpoint);
-    record_command_checkpoint("final-result-emission-begins", checkpoint);
-    writeOutput(1, `${candidate}\n`);
-    record_command_checkpoint("final-result-emission-completes", checkpoint);
-    return 0;
+    trace_internal_cli("run-command-resolved");
+    return Object.freeze({ exitCode: 0 as const, emit: () => writeOutput(1, `${candidate}\n`) });
   } catch (error) {
     record_command_checkpoint("capture-function-rejected", checkpoint);
     const cause = error instanceof Error ? error : new Error(String(error));
-    record_command_checkpoint("final-result-emission-begins", checkpoint);
-    writeOutput(2, `${cause.stack ?? cause.message}\n`);
-    record_command_checkpoint("final-result-emission-completes", checkpoint);
-    return 1;
+    trace_internal_cli("run-command-resolved");
+    return Object.freeze({ exitCode: 1 as const, emit: () => writeOutput(2, `${cause.stack ?? cause.message}\n`) });
   }
 }
 
 if (is_deployment_capture_main(import.meta.url, process.argv[1])) {
   let exitCode: 0 | 1 = 1;
   try {
-    exitCode = await run_deployment_capture_command(process.argv.slice(2));
+    const commandResult = await run_deployment_capture_command(process.argv.slice(2));
+    exitCode = commandResult.exitCode;
+    trace_internal_cli("main-result-received");
     record_command_checkpoint("command-result-resolved", injected_command_dependencies().checkpoint);
+    trace_internal_cli("final-output-begin");
+    record_command_checkpoint("final-result-emission-begins", injected_command_dependencies().checkpoint);
+    commandResult.emit();
+    trace_internal_cli("final-output-complete");
+    record_command_checkpoint("final-result-emission-completes", injected_command_dependencies().checkpoint);
   } finally {
-    await new Promise<void>((resolveExitTurn) => setImmediate(resolveExitTurn));
+    trace_internal_cli("process-exit-about-to-call");
     record_command_checkpoint("process-exit-reached", injected_command_dependencies().checkpoint);
     process.exit(exitCode);
   }

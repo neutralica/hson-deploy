@@ -301,14 +301,13 @@ test("production npm/tsx capture CLI persists, emits, and exits pass and fail ou
       assert.deepEqual(checkpoints.map(({ name }) => name), [
         "terminal-file-written",
         fixture.status === "passed" ? "capture-function-resolved" : "capture-function-rejected",
+        "command-result-resolved",
         "final-result-emission-begins",
         "final-result-emission-completes",
-        "command-result-resolved",
         "process-exit-reached",
       ]);
       assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)), "every boundary must snapshot active resource types");
-      assert.ok(checkpoints[0]!.activeResources.includes("FSReqPromise"), "terminal persistence must reproduce the live FSReqPromise boundary");
-      assert.equal(checkpoints.at(-1)!.activeResources.includes("FSReqPromise"), false, "explicit exit must occur after the FS completion callback unwinds");
+      assert.equal(checkpoints.some(({ activeResources }) => activeResources.includes("FSReqPromise")), false, "the production-shaped terminal path must not manufacture asynchronous filesystem settlement");
       assert.match(stdout, /> \.\/node_modules\/\.bin\/tsx scripts\/capture-deployment-tests\.mts --certification-only\n/, "npm must launch the production tsx command");
       assert.equal(signal, null);
       assert.equal(code, fixture.exitCode);
@@ -377,9 +376,9 @@ test("production npm/tsx certification exits after a real validation failure", a
     assert.deepEqual(checkpoints.map(({ name }) => name), [
       "terminal-file-written",
       "capture-function-rejected",
+      "command-result-resolved",
       "final-result-emission-begins",
       "final-result-emission-completes",
-      "command-result-resolved",
       "process-exit-reached",
     ]);
     assert.ok(checkpoints.every(({ activeResources }) => Array.isArray(activeResources)));
