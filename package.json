@@ -35,6 +35,7 @@
     "pack": "npm -w hson-demo2 run pack",
     "certify": "npm -w hson-demo2 run certify",
     "status:cert": "node scripts/status-certification.mjs",
+    "watch:cert": "while true; do clear; npm run --silent status:cert; sleep 2; done",
     "artifact:location": "npm -w hson-demo2 run artifact:location",
     "test:certified-package-boundary": "node --test scripts/certified-package-boundary.test.mjs",
     "verify": "npm run verify:runtime && npm run verify:workspace && npm run verify:submodules",
