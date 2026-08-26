@@ -38,12 +38,19 @@ a Pages project, or change custom domains. The existing Cloudflare Pages Git
 integration remains externally enabled and should be disabled before direct
 upload becomes the sole production publication authority.
 
-The root operator command is `npm run deploy`. It runs the existing guarded
-`subs:update` reconciliation and workspace verification, reuses an existing
-artifact only when its certification receipt identifies the current deployment
-commit and evidence hash and the exact static bytes still verify against the
-matching accepted materialization, otherwise runs the existing `certify`
-command, and finally invokes `deploy:static`.
+The ordinary operator command is `npm run deploy`. It validates the currently
+materialized certified `static-production/` artifact against its own receipt,
+evidence identity, accepted materialization, and exact static bytes. If valid,
+it deploys those bytes even when their certified deployment commit is older
+than the current source checkout. If no valid certified artifact is available,
+it runs the existing `certify` command for the currently pinned source,
+validates the result, and finally invokes `deploy:static`. It never runs
+`subs:update` or workspace verification and does not prepare or mutate source.
+
+`npm run deploy:latest` is the separate source-advancing intention. It runs
+`subs:update`, verifies the synchronized workspace, reuses the artifact only
+when it is both valid and certified for the resulting deployment commit,
+otherwise certifies that commit, and then invokes `deploy:static`.
 
 LiveDemo owns the certified package command and test policy. This repository retains the deployment-workspace
 primitives for clean gitlink verification, capture, evidence materialization, static assembly, and artifact

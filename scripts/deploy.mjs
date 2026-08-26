@@ -18,21 +18,54 @@ export function execute_deploy(options = {}) {
   const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
   const run = options.run ?? run_command;
   const environment = options.environment ?? process.env;
+  const log = options.log ?? console.log;
+
+  const inspectReuse = options.inspectReuse ?? inspect_reusable_certified_artifact;
+  let reuse = inspectReuse({ deploymentRoot });
+  const reusedExisting = reuse.valid;
+  if (reuse.valid) {
+    log(`Certified artifact ........ VALID`);
+    log(`Certified deployment ...... ${reuse.certifiedDeploymentCommit}`);
+    log(`Current deployment ........ ${reuse.currentDeploymentCommit}`);
+    log(`Freshness .................. ${reuse.freshness.toUpperCase()}`);
+    log(`Deploying certified artifact ${reuse.certifiedDeploymentCommit}.`);
+  } else {
+    log(`No valid certified artifact is available (${reuse.reason}); certifying the currently pinned deployment revision.`);
+    run("npm", ["run", "certify"], { cwd: deploymentRoot, env: environment });
+    reuse = inspectReuse({ deploymentRoot });
+    if (!reuse.valid) {
+      throw new Error(`Certification completed without a valid certified artifact: ${reuse.reason}.`);
+    }
+  }
+
+  run("npm", ["run", "deploy:static"], { cwd: deploymentRoot, env: environment });
+  return Object.freeze({ reused: reusedExisting });
+}
+
+export function execute_deploy_latest(options = {}) {
+  const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
+  const run = options.run ?? run_command;
+  const environment = options.environment ?? process.env;
+  const log = options.log ?? console.log;
+  const inspectReuse = options.inspectReuse ?? inspect_reusable_certified_artifact;
 
   run("npm", ["run", "subs:update"], { cwd: deploymentRoot, env: environment });
   run("npm", ["run", "verify"], { cwd: deploymentRoot, env: environment });
 
-  const inspectReuse = options.inspectReuse ?? inspect_reusable_certified_artifact;
   let reuse = inspectReuse({ deploymentRoot });
-  const reusedExisting = reuse.reusable;
-  if (reuse.reusable) {
-    console.log(`Reusing certified static artifact for ${reuse.receipt.deploymentCommit}.`);
+  const reusedExisting = reuse.valid && reuse.freshness === "current";
+  if (reusedExisting) {
+    log(`Reusing current certified static artifact for ${reuse.certifiedDeploymentCommit}.`);
   } else {
-    console.log(`Certified artifact is not reusable (${reuse.reason}); running certification.`);
+    const reason = reuse.valid
+      ? `available certification is ${reuse.freshness} (${reuse.certifiedDeploymentCommit})`
+      : reuse.reason;
+    log(`No valid current-source certification is available (${reason}); certifying the synchronized deployment revision.`);
     run("npm", ["run", "certify"], { cwd: deploymentRoot, env: environment });
     reuse = inspectReuse({ deploymentRoot });
-    if (!reuse.reusable) {
-      throw new Error(`Certification completed without a reusable certified artifact: ${reuse.reason}.`);
+    if (!reuse.valid || reuse.freshness !== "current") {
+      const result = reuse.valid ? `artifact freshness is ${reuse.freshness}` : reuse.reason;
+      throw new Error(`Certification completed without a valid current-source certified artifact: ${result}.`);
     }
   }
 
@@ -41,7 +74,13 @@ export function execute_deploy(options = {}) {
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { execute_deploy(); }
+  try {
+    if (process.argv.length > 3 || (process.argv[2] !== undefined && process.argv[2] !== "--latest")) {
+      throw new Error("Usage: node scripts/deploy.mjs [--latest]");
+    }
+    if (process.argv[2] === "--latest") execute_deploy_latest();
+    else execute_deploy();
+  }
   catch (error) {
     console.error(`deploy: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

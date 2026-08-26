@@ -37,31 +37,34 @@ async function fixture(receiptOverrides = {}) {
   return { deploymentRoot, artifact };
 }
 
-test("certified artifact reuse requires current source, evidence identity, and exact byte verification", async () => {
+test("certified artifact validity is intrinsic while freshness reports current source identity", async () => {
   const valid = await fixture();
   const reusable = inspect_reusable_certified_artifact({ ...valid, currentCommit: () => commit });
-  assert.equal(reusable.reusable, true);
+  assert.equal(reusable.valid, true);
+  assert.equal(reusable.freshness, "current");
   assert.equal(reusable.authority.artifactSetSha256, artifactSet);
 
   const stale = inspect_reusable_certified_artifact({ ...valid, currentCommit: () => "c".repeat(40) });
-  assert.equal(stale.reusable, false);
-  assert.match(stale.reason, /source revision/);
+  assert.equal(stale.valid, true);
+  assert.equal(stale.freshness, "stale");
+  assert.equal(stale.certifiedDeploymentCommit, commit);
+  assert.equal(stale.currentDeploymentCommit, "c".repeat(40));
 
   const staleAuthority = await fixture({ authority: "npm -w hson-demo2 run test:inclusive-library-node" });
   const rejectedAuthority = inspect_reusable_certified_artifact({ ...staleAuthority, currentCommit: () => commit });
-  assert.equal(rejectedAuthority.reusable, false);
+  assert.equal(rejectedAuthority.valid, false);
   assert.match(rejectedAuthority.reason, /stale or unknown authority/);
 
   const mismatched = await fixture({ evidenceArtifactSetSha256: "d".repeat(64) });
   const rejectedHash = inspect_reusable_certified_artifact({ ...mismatched, currentCommit: () => commit });
-  assert.equal(rejectedHash.reusable, false);
+  assert.equal(rejectedHash.valid, false);
   assert.match(rejectedHash.reason, /certified evidence hash/);
 });
 
-test("verified receipt metadata cannot authorize corrupted static bytes", async () => {
+test("corrupted static bytes remain invalid regardless of source freshness", async () => {
   const value = await fixture();
   await writeFile(join(value.artifact, "index.html"), "<html>missing immutable evidence root</html>");
-  const result = inspect_reusable_certified_artifact({ ...value, currentCommit: () => commit });
-  assert.equal(result.reusable, false);
+  const result = inspect_reusable_certified_artifact({ ...value, currentCommit: () => "c".repeat(40) });
+  assert.equal(result.valid, false);
   assert.match(result.reason, /does not match any accepted materialization/);
 });

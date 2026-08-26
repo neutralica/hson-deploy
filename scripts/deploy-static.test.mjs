@@ -20,6 +20,7 @@ const OBSERVED_WRANGLER_PROJECTS = [
 function authority() {
   return {
     artifact: "/fixture/hson-deploy/static-production",
+    evidenceRoot: `/test-evidence/${"a".repeat(40)}`,
     environment: {
       VITE_TEST_EVIDENCE_ROOT: `/test-evidence/${"a".repeat(40)}`,
       TEST_EVIDENCE_ACCEPTANCE_FILE: "/fixture/accepted.json",
@@ -31,7 +32,6 @@ function successful_runner(calls, projects = OBSERVED_WRANGLER_PROJECTS) {
   return (command, arguments_, options) => {
     calls.push({ command, arguments_, options });
     if (command === "wrangler" && arguments_.join(" ") === "pages project list --json") return JSON.stringify(projects);
-    if (command === "git") return `${"b".repeat(40)}\n`;
     if (command === "wrangler") return "✨ Deployment complete! https://fixture.pages.dev\n";
     return "";
   };
@@ -43,8 +43,7 @@ test("deploy:static verifies first and publishes the exact directory to the guar
   assert.deepEqual(calls.map(({ command, arguments_ }) => `${command} ${arguments_.join(" ")}`), [
     "npm run verify:static-production-artifact",
     "wrangler pages project list --json",
-    "git rev-parse HEAD",
-    `wrangler pages deploy ${STATIC_DIRECTORY} --project-name=${PAGES_PROJECT} --branch=${PAGES_BRANCH} --commit-hash=${"b".repeat(40)} --commit-dirty=false`,
+    `wrangler pages deploy ${STATIC_DIRECTORY} --project-name=${PAGES_PROJECT} --branch=${PAGES_BRANCH} --commit-hash=${"a".repeat(40)} --commit-dirty=false`,
   ]);
   assert.equal(result.project, "hson-deploy");
   assert.equal(result.directory, "/fixture/hson-deploy/static-production");

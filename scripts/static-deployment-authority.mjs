@@ -79,18 +79,17 @@ export function inspect_reusable_certified_artifact(options = {}) {
   const artifact = resolve(options.artifact ?? join(deploymentRoot, "static-production"));
   const receiptPath = join(artifact, "certification-receipt.json");
   const receipt = read_json(receiptPath);
-  const currentCommit = (options.currentCommit ?? git_head)(deploymentRoot);
   if (receipt?.schemaVersion !== 1 || receipt.kind !== "hson-tests-explorer-certification" || receipt.certified !== true) {
-    return Object.freeze({ reusable: false, reason: "certification receipt missing or invalid" });
+    return Object.freeze({ valid: false, reason: "certification receipt missing or invalid" });
   }
   if (receipt.authority !== EXPECTED_CERTIFICATION_AUTHORITY) {
-    return Object.freeze({ reusable: false, reason: "certification receipt names a stale or unknown authority" });
+    return Object.freeze({ valid: false, reason: "certification receipt names a stale or unknown authority" });
   }
-  if (receipt.deploymentCommit !== currentCommit || receipt.evidenceRoot !== `/test-evidence/${currentCommit}`) {
-    return Object.freeze({ reusable: false, reason: "certified source revision does not match current deployment revision" });
+  if (!/^[0-9a-f]{40}$/.test(receipt.deploymentCommit ?? "") || receipt.evidenceRoot !== `/test-evidence/${receipt.deploymentCommit}`) {
+    return Object.freeze({ valid: false, reason: "certification receipt source identity is missing or internally inconsistent" });
   }
   if (!HASH_PATTERN.test(receipt.evidenceArtifactSetSha256 ?? "")) {
-    return Object.freeze({ reusable: false, reason: "certified evidence identity is missing or invalid" });
+    return Object.freeze({ valid: false, reason: "certified evidence identity is missing or invalid" });
   }
   try {
     const authority = resolve_static_artifact_verification({
@@ -99,10 +98,20 @@ export function inspect_reusable_certified_artifact(options = {}) {
       evidenceArtifactSetSha256: receipt.evidenceArtifactSetSha256,
     });
     if (authority.artifactSetSha256 !== receipt.evidenceArtifactSetSha256 || !EVIDENCE_ROOT_PATTERN.test(authority.evidenceRoot.slice(1))) {
-      return Object.freeze({ reusable: false, reason: "certification and evidence identity do not match" });
+      return Object.freeze({ valid: false, reason: "certification and evidence identity do not match" });
     }
-    return Object.freeze({ reusable: true, receipt, receiptPath, authority });
+    const currentDeploymentCommit = (options.currentCommit ?? git_head)(deploymentRoot);
+    const freshness = receipt.deploymentCommit === currentDeploymentCommit ? "current" : "stale";
+    return Object.freeze({
+      valid: true,
+      freshness,
+      certifiedDeploymentCommit: receipt.deploymentCommit,
+      currentDeploymentCommit,
+      receipt,
+      receiptPath,
+      authority,
+    });
   } catch (cause) {
-    return Object.freeze({ reusable: false, reason: cause instanceof Error ? cause.message : String(cause) });
+    return Object.freeze({ valid: false, reason: cause instanceof Error ? cause.message : String(cause) });
   }
 }

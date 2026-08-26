@@ -50,6 +50,7 @@
     "deploy:static": "node scripts/deploy-static.mjs",
     "test:deploy": "node --test scripts/static-deployment-authority.test.mjs scripts/deploy-static.test.mjs scripts/deploy.test.mjs",
     "deploy": "node scripts/deploy.mjs",
+    "deploy:latest": "node scripts/deploy.mjs --latest",
     "verify:demo2": "test \"$(git -C hson-demo2 rev-parse HEAD)\" = \"$(git -C hson-demo2 rev-parse origin/main)\" && test \"$(git ls-tree HEAD hson-demo2 | awk '{print $3}')\" = \"$(git -C hson-demo2 rev-parse HEAD)\"",
     "push": "git push",
     "deploy:worker": "npm run preflight:worker && node scripts/preflight-cloudflare.mjs && npm -w hson-demo2 run cloudflare:deploy"

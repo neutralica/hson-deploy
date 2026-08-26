@@ -43,7 +43,8 @@ export function execute_static_deploy(options = {}) {
     throw new Error(`Cloudflare Pages project guard failed: expected ${PAGES_PROJECT}; available projects: ${names.join(", ") || "(none)"}.`);
   }
 
-  const commit = run("git", ["rev-parse", "HEAD"], { cwd: deploymentRoot, env: environment }).trim();
+  const commit = authority.evidenceRoot.slice("/test-evidence/".length);
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("Static artifact evidence root does not identify an exact deployment commit.");
   const output = run("wrangler", [
     "pages", "deploy", STATIC_DIRECTORY,
     `--project-name=${PAGES_PROJECT}`,
