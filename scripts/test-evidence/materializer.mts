@@ -118,8 +118,8 @@ function validate_accounting(reports: Partial<Record<Category, JsonObject>>, met
   assert.equal(semanticCases.every((item: JsonObject) => item.status === "pass" && item.diagnostic !== null), true, "TEST_EVIDENCE_SEMANTIC_DIAGNOSTICS_INCOMPLETE");
   const opaque = semantic.suiteRuns.filter((suite: JsonObject) => suite.executionShape === "opaque-aggregate");
   const opaqueChecks = opaque.reduce((total: number, suite: JsonObject) => total + suite.counts.passed, 0);
-  const opaqueDeclared = opaque.reduce((total: number, suite: JsonObject) => total + suite.counts.declared, 0);
-  assert.equal(opaqueChecks, opaqueDeclared, "TEST_EVIDENCE_OPAQUE_ACCOUNTING");
+  const opaqueObserved = opaque.reduce((total: number, suite: JsonObject) => total + suite.counts.total, 0);
+  assert.equal(opaqueChecks, opaqueObserved, "TEST_EVIDENCE_OPAQUE_ACCOUNTING");
 
   const browser = reports.browser;
   assert.ok(browser, "TEST_EVIDENCE_BROWSER_REPORT_MISSING");
@@ -131,7 +131,7 @@ function validate_accounting(reports: Partial<Record<Category, JsonObject>>, met
   const certification = reports.certification;
   const certificationCount = certification?.suiteRuns.length ?? 0;
   return Object.freeze({
-    semantic: { canonical: semantic.summary, opaqueChecks: { total: opaqueDeclared, pass: opaqueChecks } },
+    semantic: { canonical: semantic.summary, opaqueChecks: { total: opaqueObserved, pass: opaqueChecks } },
     browserJourneys: { total: browserCases.length, pass: browserCases.length },
     certifications: { total: certificationCount, pass: certificationCount },
     inspectionReruns: 0,

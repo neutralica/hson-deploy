@@ -16,7 +16,7 @@ function suite(id: string, shape: string, cases: any[], retained: any[] = [], su
   return {
     id, title: id, subject: "HSON", collections: [], provenance: { source: "fixture" }, order: 0,
     executionShape: shape, plannedExecutorId: "fixture", sourceRef: shape === "certification-aggregate" ? `node-command:${id}` : null,
-    declaredChecks: shape === "opaque-aggregate" ? 1 : null, status: "pass", ...lifecycle(),
+    declaredChecks: null, status: "pass", ...lifecycle(),
     counts: shape === "opaque-aggregate"
       ? { declared: 1, total: 1, executed: 1, passed: 1, failed: 0, skipped: 0, unsupported: 0, cancelled: 0 }
       : { declared: cases.length, total: cases.length, executed: cases.length, passed: cases.length, failed: 0, skipped: 0, unsupported: 0, cancelled: 0 },

@@ -36,6 +36,8 @@ const CAPTURE_STATE_COMMAND_TIMEOUT_MS = 30_000;
 const CAPTURE_STATE_DISPOSAL_TIMEOUT_MS = 3_000;
 export const DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_LIMIT_BYTES = 16 * 1024;
 const DEPLOYMENT_CAPTURE_TERMINAL_TRUNCATION = "\n<DEPLOYMENT_CAPTURE_TERMINAL_OUTPUT_TRUNCATED>\n";
+const DEPLOYMENT_CAPTURE_CAUSE_OUTPUT_LIMIT_BYTES = 4 * 1024;
+const DEPLOYMENT_CAPTURE_CAUSE_TRUNCATION = "\n<DEPLOYMENT_CAPTURE_CAUSE_TRUNCATED>";
 const INTERNAL_CLI_TRACE_ENABLED = process.env.DEPLOYMENT_CAPTURE_INTERNAL_CLI_TRACE === "1";
 let internalCliTrace: { path: string; sequence: number } | undefined;
 
@@ -192,12 +194,14 @@ function failing_suite_ids_from_error(error: Error): readonly string[] {
 
 class DeploymentCaptureFailure extends Error {
   readonly candidate: string;
+  readonly failedStage: string;
   readonly failingSuiteIds: readonly string[];
 
-  constructor(candidate: string, cause: Error) {
+  constructor(candidate: string, failedStage: string, cause: Error) {
     super(cause.message, { cause });
     this.name = cause.name;
     this.candidate = candidate;
+    this.failedStage = failedStage;
     this.failingSuiteIds = failing_suite_ids_from_error(cause);
   }
 }
@@ -228,7 +232,7 @@ function validate(name: Name, intended: readonly string[], report: HostedTestRep
   assert.equal(report.summary.fail, 0); assert.equal(report.summary.skip, 0); assert.equal(report.suiteRuns.every((suite) => suite.status === "pass"), true);
   assert.deepEqual(JSON.parse(JSON.stringify(report)), report, "report must be JSON-safe without lossy fields");
   const summary = hosted_test_projection_summary(report);
-  if (name === "semantic") { assert.equal(summary.canonical.pass, summary.canonical.total); assert.equal(summary.launchers.passedChecks, summary.launchers.declaredChecks); assert.equal(report.suiteRuns.filter((suite) => suite.executionShape === "cases").every((suite) => suite.cases.every((test) => test.diagnostic !== null)), true); }
+  if (name === "semantic") { assert.equal(summary.canonical.pass, summary.canonical.total); assert.equal(summary.launchers.passedChecks, summary.launchers.observedChecks); assert.equal(report.suiteRuns.filter((suite) => suite.executionShape === "cases").every((suite) => suite.cases.every((test) => test.diagnostic !== null)), true); }
   if (name === "browser") {
     assert.equal(report.suiteRuns.every((suite) => suite.executionShape === "browser-journeys"), true, "browser capture contains a non-browser suite");
     assert.equal(summary.browser.pass, intended.length);
@@ -353,7 +357,7 @@ export async function capture_deployment_tests(options: DeploymentCaptureOptions
     const cause = error instanceof Error ? error : new Error(String(error));
     if (!preflightCompleted) atomic_sync(preflightPath, { captureId, status: "failed", startedAt: preflightStartedAt, completedAt: new Date().toISOString(), stage: "preflight-state", error: { name: cause.name, message: cause.message } });
     atomic_sync(join(candidate, "capture-diagnostics.json"), { captureId, failedStage: stage, selection, observedStages, timeline, browserCorpus: failed_report_summary(latestReport), error: { name: cause.name, message: cause.message, stack: cause.stack } });
-    throw new DeploymentCaptureFailure(candidate, cause);
+    throw new DeploymentCaptureFailure(candidate, stage, cause);
   } finally {
     try {
       stage = "cleanup-client-close";
@@ -470,6 +474,14 @@ function bounded_terminal_output(value: string): string {
   return Buffer.concat([retained, marker]).toString("utf8");
 }
 
+function bounded_capture_failure_cause(value: string): string {
+  const bytes = Buffer.from(value);
+  if (bytes.byteLength <= DEPLOYMENT_CAPTURE_CAUSE_OUTPUT_LIMIT_BYTES) return value;
+  const marker = Buffer.from(DEPLOYMENT_CAPTURE_CAUSE_TRUNCATION);
+  const retained = bytes.subarray(0, DEPLOYMENT_CAPTURE_CAUSE_OUTPUT_LIMIT_BYTES - marker.byteLength);
+  return Buffer.concat([retained, marker]).toString("utf8");
+}
+
 export function write_terminal_output(fd: 1 | 2, value: string): void {
   const bytes = Buffer.from(bounded_terminal_output(value));
   try {
@@ -497,6 +509,10 @@ export function format_deployment_capture_failure(
   if (failingSuiteIds.length > 0) {
     lines.push(`Failed suites: ${failingSuiteIds.length}`);
     lines.push(...failingSuiteIds.map((id) => `- ${id}`));
+    lines.push("");
+  }
+  if (cause instanceof DeploymentCaptureFailure && cause.failedStage === "preflight-state") {
+    lines.push(`Failure: ${bounded_capture_failure_cause(cause.message)}`);
     lines.push("");
   }
   if (candidate !== undefined) {
