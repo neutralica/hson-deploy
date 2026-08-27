@@ -1,5 +1,6 @@
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { validate_accepted_static_test_evidence } from "./static-test-evidence-config.mjs";
 
@@ -9,26 +10,51 @@ function parse_json(bytes, label) {
 }
 
 function public_index(source) {
-  return {
-    ...source,
-    categories: source.categories.map(({ report: _report, ...category }) => category),
-  };
+  return source;
 }
 
-function row_references(index) {
-  const references = [];
-  for (const suite of index.suites) {
-    if (suite.evidence?.available === true) references.push(suite.evidence);
-    for (const item of suite.cases) if (item.evidence?.available === true) references.push(item.evidence);
-  }
-  return references;
-}
+function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
 
 function safe_relative_path(value) {
   if (typeof value !== "string" || value.startsWith("/") || value.includes("\\") || value.split("/").some((part) => part === "" || part === "." || part === "..")) {
     throw new Error(`Public frozen evidence path is unsafe: ${String(value)}.`);
   }
   return value;
+}
+
+async function referenced_json(evidenceRoot, reference, expectedPrefix) {
+  const path = safe_relative_path(reference?.path);
+  if (!new RegExp(`^${expectedPrefix}/[A-Za-z0-9_-]+\\.json$`).test(path)) throw new Error(`Public frozen evidence has an invalid ${expectedPrefix} path: ${path}.`);
+  const bytes = await readFile(resolve(evidenceRoot, path));
+  if (bytes.byteLength !== reference.rawBytes || sha256(bytes) !== reference.sha256) throw new Error(`Accepted frozen evidence metadata mismatch before static assembly: ${path}.`);
+  return { path, reference, value: parse_json(bytes, `Accepted frozen evidence ${path}`) };
+}
+
+async function public_references(index, evidenceRoot) {
+  const output = [];
+  const suiteIds = new Set();
+  const caseIds = new Set();
+  for (const category of index.categories ?? []) {
+    const categoryRecord = await referenced_json(evidenceRoot, category.listing, "categories");
+    if (categoryRecord.value.categoryId !== category.id) throw new Error(`Accepted frozen category identity mismatch: ${category.id}.`);
+    output.push(categoryRecord);
+    for (const suite of categoryRecord.value.suites ?? []) {
+      if (suite.categoryId !== category.id || suiteIds.has(suite.id)) throw new Error(`Accepted frozen suite category or identity mismatch: ${suite.id}.`);
+      suiteIds.add(suite.id);
+      const suiteRecord = await referenced_json(evidenceRoot, suite.listing, "suites");
+      if (suiteRecord.value.categoryId !== category.id || suiteRecord.value.suiteId !== suite.id) throw new Error(`Accepted frozen suite envelope identity mismatch: ${suite.id}.`);
+      output.push(suiteRecord);
+      for (const item of suiteRecord.value.cases ?? []) {
+        if (caseIds.has(item.id)) throw new Error(`Accepted frozen case identity is duplicated: ${item.id}.`);
+        caseIds.add(item.id);
+        if (item.evidence?.available !== true) continue;
+        const caseRecord = await referenced_json(evidenceRoot, item.evidence, "cases");
+        if (caseRecord.value.suiteId !== suite.id || caseRecord.value.caseId !== item.id) throw new Error(`Accepted frozen case envelope identity mismatch: ${item.id}.`);
+        output.push(caseRecord);
+      }
+    }
+  }
+  return output;
 }
 
 export async function assemble_static_test_evidence(options = {}) {
@@ -42,14 +68,15 @@ export async function assemble_static_test_evidence(options = {}) {
   const indexBytes = await readFile(accepted.indexPath);
   const index = public_index(parse_json(indexBytes, "Accepted Phase 3 index"));
   if (JSON.stringify(index).includes("reports/")) throw new Error("Public frozen index must not retain canonical report paths.");
-  const references = row_references(index);
-  const unique = new Map(references.map((reference) => [safe_relative_path(reference.path), reference]));
+  const references = await public_references(index, accepted.evidenceRoot);
+  const unique = new Map(references.map((record) => [record.path, record.reference]));
   await mkdir(destination, { recursive: true });
   const projectedIndexBytes = Buffer.from(`${JSON.stringify(index, null, 2)}\n`);
   await writeFile(resolve(destination, "index.json"), projectedIndexBytes);
 
   let caseBytes = 0;
   let suiteBytes = 0;
+  let categoryBytes = 0;
   for (const [path, reference] of unique) {
     const source = resolve(accepted.evidenceRoot, path);
     const target = resolve(destination, path);
@@ -60,6 +87,7 @@ export async function assemble_static_test_evidence(options = {}) {
     await copyFile(source, target);
     if (path.startsWith("cases/")) caseBytes += sourceStats.size;
     else if (path.startsWith("suites/")) suiteBytes += sourceStats.size;
+    else if (path.startsWith("categories/")) categoryBytes += sourceStats.size;
     else throw new Error(`Public frozen evidence row has an unsupported path: ${path}.`);
   }
   return Object.freeze({
@@ -69,8 +97,9 @@ export async function assemble_static_test_evidence(options = {}) {
     indexBytes: projectedIndexBytes.byteLength,
     caseBytes,
     suiteBytes,
+    categoryBytes,
     provenanceBytes: 0,
-    rawBytes: projectedIndexBytes.byteLength + caseBytes + suiteBytes,
+    rawBytes: projectedIndexBytes.byteLength + categoryBytes + caseBytes + suiteBytes,
   });
 }
 

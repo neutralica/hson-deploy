@@ -12,10 +12,13 @@ test("existing LiveHost exact routes serve immutable JSON bytes without test exe
   const root = await mkdtemp(join(tmpdir(), "hson-livehost-evidence-"));
   const fixture = await make_capture(root);
   const materialized = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
-  const caseRecords = materialized.index.suites.flatMap((suite: any) => suite.cases.map((item: any) => item.evidence).filter((entry: any) => entry.available));
-  const suiteRecord = materialized.index.suites.map((suite: any) => suite.evidence).find((entry: any) => entry.available);
+  const categoryRecords = materialized.index.categories.map((category: any) => category.listing);
+  const categories = await Promise.all(categoryRecords.map(async (entry: any) => JSON.parse(await readFile(join(materialized.evidenceRoot, entry.path), "utf8"))));
+  const suiteRecords = categories.flatMap((category: any) => category.suites.map((suite: any) => suite.listing));
+  const suites = await Promise.all(suiteRecords.map(async (entry: any) => JSON.parse(await readFile(join(materialized.evidenceRoot, entry.path), "utf8"))));
+  const caseRecords = suites.flatMap((suite: any) => suite.cases.map((item: any) => item.evidence).filter((entry: any) => entry.available));
   const largestCase = caseRecords.reduce((largest: any, entry: any) => entry.rawBytes > largest.rawBytes ? entry : largest);
-  const selected = ["index.json", caseRecords[0].path, largestCase.path, suiteRecord.path].filter((path, index, values) => values.indexOf(path) === index);
+  const selected = ["index.json", categoryRecords[0].path, suiteRecords[0].path, caseRecords[0].path, largestCase.path].filter((path, index, values) => values.indexOf(path) === index);
   let testExecutions = 0;
   let disposed = 0;
   const application: LiveHostApplication = Object.freeze({

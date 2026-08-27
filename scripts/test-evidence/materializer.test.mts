@@ -3,7 +3,6 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { decode_frozen_test_evidence_index } from "../../hson-demo2/src/app/demos/tests/panel/frozen-test-evidence-client";
 import { decode_artifact_id, encode_artifact_id, materialize_test_evidence, validate_capture, verify_materialized_evidence } from "./materializer.mjs";
 import { make_capture } from "./test-fixture.mjs";
 
@@ -65,11 +64,10 @@ test("normal semantic and browser capture materializes without executing certifi
   await writeFile(join(fixture.capture, "capture-metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
   await rm(join(fixture.capture, "certification.json"));
   const result = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
-  assert.deepEqual(result.index.selectionCategories, ["semantic", "browser", "certification"]);
-  assert.equal(result.index.categories.find((category: any) => category.id === "certification").status, "cancelled");
+  assert.equal(result.index.categories.find((category: any) => category.id === "certification").status, "unexecuted");
   assert.deepEqual(Object.keys(result.provenance.runs), ["semantic", "browser"]);
-  assert.equal(result.index.suites.some((suite: any) => suite.category === "certification"), false);
-  assert.equal(decode_frozen_test_evidence_index(result.index, "a".repeat(40)).categories.length, 3);
+  assert.equal(result.index.overall.suites, 3);
+  assert.deepEqual(result.index.categories.map((category: any) => category.id), ["transform", "livetree", "livemap", "locus", "livehost", "reflect", "unit", "browser", "certification"]);
 });
 
 test("path encoding is reversible, filesystem-safe, and collision-free", () => {
@@ -86,13 +84,16 @@ test("index and lazy artifacts exactly partition retained case and suite evidenc
   const result = await materialize_test_evidence(fixture.candidate, { workRoot: join(root, "work"), verifyRevisions: false, materializedAt: "fixed" });
   assert.equal(result.verification.caseCount, 2);
   assert.equal(result.verification.caseArtifactCount, 2);
-  assert.equal(result.verification.suiteArtifactCount, 4);
+  assert.equal(result.verification.suiteArtifactCount, 6);
+  assert.equal(result.verification.categoryArtifactCount, 9);
   assert.equal(result.verification.evidenceEntryCount, 5);
-  assert.equal(result.index.suites.length, 6);
+  assert.equal(result.index.overall.suites, 6);
   assert.equal(JSON.stringify(result.index).includes("transformerArtifact"), false);
   assert.equal(JSON.stringify(result.index).includes("browser attachment"), false);
-  const semantic = result.index.suites.find((entry: any) => entry.id === "semantic/suite");
-  assert.equal(semantic.cases[0].evidence.rawBytes, (await stat(join(result.evidenceRoot, semantic.cases[0].evidence.path))).size);
+  const category = JSON.parse(await readFile(join(result.evidenceRoot, result.index.categories.find((entry: any) => entry.id === "transform").listing.path), "utf8"));
+  const semantic = category.suites.find((entry: any) => entry.id === "transform/semantic-suite");
+  const suite = JSON.parse(await readFile(join(result.evidenceRoot, semantic.listing.path), "utf8"));
+  assert.equal(suite.cases[0].evidence.rawBytes, (await stat(join(result.evidenceRoot, suite.cases[0].evidence.path))).size);
 });
 
 test("canonical report bytes, report hashes, provenance, and artifact-set digest independently verify", async () => {
@@ -104,7 +105,9 @@ test("canonical report bytes, report hashes, provenance, and artifact-set digest
   assert.deepEqual(result.provenance.deployment, fixture.metadata.deployment);
   assert.equal(result.provenance.runs.semantic.reportBytes, (await stat(join(fixture.capture, "semantic.json"))).size);
   await verify_materialized_evidence(source, result.evidenceRoot);
-  const casePath = result.index.suites[0].cases[0].evidence.path;
+  const category = JSON.parse(await readFile(join(result.evidenceRoot, result.index.categories.find((entry: any) => entry.id === "transform").listing.path), "utf8"));
+  const suite = JSON.parse(await readFile(join(result.evidenceRoot, category.suites[0].listing.path), "utf8"));
+  const casePath = suite.cases[0].evidence.path;
   await writeFile(join(result.evidenceRoot, casePath), "{}\n");
   await assert.rejects(verify_materialized_evidence(source, result.evidenceRoot), /CASE_SIZE_MISMATCH|CASE_MUTATED/);
 });
@@ -119,14 +122,10 @@ test("repeat materialization is byte-deterministic when materializedAt is fixed"
   assert.deepEqual(await readFile(join(first.evidenceRoot, "provenance.json")), await readFile(join(second.evidenceRoot, "provenance.json")));
 });
 
-test("a failed fresh candidate is never accepted or reused", async () => {
+test("invalid source identity rejects before a materialization candidate is created", async () => {
   const root = await temporary();
   const fixture = await make_capture(root, { longCaseId: true });
   const work = join(root, "deployment-owned-work");
-  await assert.rejects(materialize_test_evidence(fixture.candidate, { workRoot: work, verifyRevisions: false }), /MATERIALIZATION_INCOMPLETE/);
-  const candidates = await readdir(work);
-  assert.equal(candidates.length, 1);
-  await assert.rejects(stat(join(work, candidates[0], "accepted.json")));
-  assert.equal(join(work, candidates[0]).includes("hson-demo2"), false);
-  assert.equal(join(work, candidates[0]).includes("hson-live"), false);
+  await assert.rejects(materialize_test_evidence(fixture.candidate, { workRoot: work, verifyRevisions: false }), /CASE_OWNER_MISMATCH/);
+  await assert.rejects(readdir(work));
 });

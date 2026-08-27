@@ -38,19 +38,19 @@ function report(runId: string, selectionIds: string[], suites: any[]) {
 export async function make_capture(root: string, options: { longCaseId?: boolean; certificationCount?: number } = {}) {
   const capture = join(root, "candidate", "capture");
   await mkdir(capture, { recursive: true });
-  const semanticCaseId = options.longCaseId ? "x".repeat(300) : "semantic/suite::case one";
+  const semanticCaseId = options.longCaseId ? "x".repeat(300) : "transform/semantic-suite::case one";
   const semanticCase = { id: semanticCaseId, caseId: "case one", title: "case one", order: 0, status: "pass", ...lifecycle(), err: null, diagnostic: { trace: [1, 2], transformerArtifact: "kept" }, evidenceRefs: [], executorId: "fixture" };
   const semanticSuites = [
-    suite("semantic/suite", "cases", [semanticCase]),
-    suite("opaque/suite", "opaque-aggregate", [], [evidence("opaque:e1", "opaque output")]),
+    suite("transform/semantic-suite", "cases", [semanticCase]),
+    suite("unit/opaque-suite", "opaque-aggregate", [], [evidence("opaque:e1", "opaque output")]),
   ];
   const browserEvidence = evidence("browser:e1", "browser attachment");
-  const browserCase = { id: "browser/suite::journey", caseId: "journey", title: "journey", order: 0, status: "pass", ...lifecycle(), err: null, diagnostic: null, evidenceRefs: [browserEvidence.id], executorId: "fixture" };
-  const browserSuites = [suite("browser/suite", "browser-journeys", [browserCase], [browserEvidence])];
+  const browserCase = { id: "livedemo/browser/suite::journey", caseId: "journey", title: "journey", order: 0, status: "pass", ...lifecycle(), err: null, diagnostic: null, evidenceRefs: [browserEvidence.id], executorId: "fixture" };
+  const browserSuites = [suite("livedemo/browser/suite", "browser-journeys", [browserCase], [browserEvidence])];
   const certificationSuites = Array.from({ length: options.certificationCount ?? 3 }, (_, index) =>
-    suite(`cert/${index}`, "certification-aggregate", [], [evidence(`cert/${index}:e1`, `certification ${index}`)]));
+    suite(`verification/cert-${index}`, "certification-aggregate", [], [evidence(`cert/${index}:e1`, `certification ${index}`)]));
   const reports: Record<string, any> = {
-    semantic: report("run-semantic", [semanticCaseId, "opaque/suite"], semanticSuites),
+    semantic: report("run-semantic", [semanticCaseId, "unit/opaque-suite"], semanticSuites),
     browser: report("run-browser", [browserCase.id], browserSuites),
     certification: report("run-certification", certificationSuites.map((entry) => entry.id), certificationSuites),
   };

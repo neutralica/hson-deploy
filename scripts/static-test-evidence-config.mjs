@@ -2,12 +2,28 @@ import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 
+const EXPLORER_CATEGORIES = ["transform", "livetree", "livemap", "locus", "livehost", "reflect", "unit", "browser", "certification"];
+
 function parse_json(path, label) {
   let source;
   try { source = readFileSync(path, "utf8"); }
   catch (cause) { throw new Error(`${label} could not be read at ${path}.`, { cause }); }
   try { return JSON.parse(source); }
   catch (cause) { throw new Error(`${label} is not valid JSON at ${path}.`, { cause }); }
+}
+
+function encoded(id) { return Buffer.from(id, "utf8").toString("base64url"); }
+
+function checked_reference(evidenceRoot, reference, kind, id) {
+  const expected = `${kind}/${encoded(id)}.json`;
+  if (reference?.available !== true || reference.path !== expected) throw new Error(`Accepted Phase 3 ${kind} reference is invalid for ${id}.`);
+  const artifactPath = resolve(evidenceRoot, reference.path);
+  if (!artifactPath.startsWith(`${evidenceRoot}/`) || !existsSync(artifactPath)) throw new Error(`Accepted Phase 3 ${kind} evidence is missing at ${artifactPath}.`);
+  const bytes = readFileSync(artifactPath);
+  if (bytes.byteLength !== reference.rawBytes || createHash("sha256").update(bytes).digest("hex") !== reference.sha256) {
+    throw new Error(`Accepted Phase 3 ${kind} evidence metadata does not match ${reference.path}.`);
+  }
+  return parse_json(artifactPath, `Accepted Phase 3 ${kind} evidence`);
 }
 
 export function validate_static_test_evidence_root(value) {
@@ -44,21 +60,32 @@ export function validate_accepted_static_test_evidence(environment = process.env
   if (index?.deployment?.hsonDeployCommit !== configured.deploymentCommit) {
     throw new Error("Accepted Phase 3 index deployment commit does not match VITE_TEST_EVIDENCE_ROOT.");
   }
-  let rows = 0;
-  for (const suite of index.suites ?? []) {
-    for (const reference of [suite.evidence, ...(suite.cases ?? []).map((item) => item.evidence)]) {
-      if (reference?.available !== true) continue;
-      if (typeof reference.path !== "string" || !/^(?:cases|suites)\/[A-Za-z0-9_-]+\.json$/.test(reference.path)) {
-        throw new Error("Accepted Phase 3 index contains an invalid public row evidence path.");
+  const categoryIds = new Set();
+  const suiteIds = new Set();
+  const caseIds = new Set();
+  let artifacts = 0;
+  for (const category of index.categories ?? []) {
+    if (categoryIds.has(category.id)) throw new Error(`Accepted Phase 3 category is duplicated: ${category.id}.`);
+    categoryIds.add(category.id);
+    const categoryArtifact = checked_reference(evidenceRoot, category.listing, "categories", category.id);
+    artifacts += 1;
+    if (categoryArtifact.categoryId !== category.id) throw new Error(`Accepted Phase 3 category identity does not match ${category.id}.`);
+    for (const suite of categoryArtifact.suites ?? []) {
+      if (suite.categoryId !== category.id || suiteIds.has(suite.id)) throw new Error(`Accepted Phase 3 suite category or identity does not match ${suite.id}.`);
+      suiteIds.add(suite.id);
+      const suiteArtifact = checked_reference(evidenceRoot, suite.listing, "suites", suite.id);
+      artifacts += 1;
+      if (suiteArtifact.categoryId !== category.id || suiteArtifact.suiteId !== suite.id) throw new Error(`Accepted Phase 3 suite envelope identity does not match ${suite.id}.`);
+      for (const item of suiteArtifact.cases ?? []) {
+        if (caseIds.has(item.id) || item.id !== `${suite.id}::${item.caseId}`) throw new Error(`Accepted Phase 3 case identity does not match ${item.id}.`);
+        caseIds.add(item.id);
+        if (item.evidence?.available !== true) continue;
+        const caseArtifact = checked_reference(evidenceRoot, item.evidence, "cases", item.id);
+        artifacts += 1;
+        if (caseArtifact.suiteId !== suite.id || caseArtifact.caseId !== item.id) throw new Error(`Accepted Phase 3 case envelope identity does not match ${item.id}.`);
       }
-      const artifactPath = resolve(evidenceRoot, reference.path);
-      if (!existsSync(artifactPath)) throw new Error(`Accepted Phase 3 row evidence is missing at ${artifactPath}.`);
-      const artifact = readFileSync(artifactPath);
-      if (artifact.byteLength !== reference.rawBytes || createHash("sha256").update(artifact).digest("hex") !== reference.sha256) {
-        throw new Error(`Accepted Phase 3 row evidence metadata does not match ${reference.path}.`);
-      }
-      rows += 1;
     }
   }
-  return Object.freeze({ ...configured, acceptancePath, evidenceRoot, indexPath, rows });
+  if (JSON.stringify([...categoryIds]) !== JSON.stringify(EXPLORER_CATEGORIES)) throw new Error("Accepted Phase 3 index does not contain the canonical explorer category set.");
+  return Object.freeze({ ...configured, acceptancePath, evidenceRoot, indexPath, rows: artifacts, artifacts });
 }

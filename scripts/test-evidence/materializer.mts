@@ -8,6 +8,10 @@ import { assert_exact_selected_results } from "./selection-accounting.mjs";
 export const CATEGORIES = Object.freeze(["semantic", "browser", "certification"] as const);
 export const NORMAL_CATEGORIES = Object.freeze(["semantic", "browser"] as const);
 export type Category = typeof CATEGORIES[number];
+export const EXPLORER_CATEGORIES = Object.freeze([
+  "transform", "livetree", "livemap", "locus", "livehost", "reflect", "unit", "browser", "certification",
+] as const);
+export type ExplorerCategory = typeof EXPLORER_CATEGORIES[number];
 type JsonObject = Record<string, any>;
 type ArtifactRecord = Readonly<{ path: string; rawBytes: number; sha256: string }>;
 
@@ -42,6 +46,21 @@ export function decode_artifact_id(encoded: string): string {
   const decoded = Buffer.from(encoded, "base64url").toString("utf8");
   assert.equal(encode_artifact_id(decoded), encoded, "TEST_EVIDENCE_ID_ENCODING_NON_CANONICAL");
   return decoded;
+}
+
+export function explorer_category_from_suite_id(id: string): ExplorerCategory {
+  assert.equal(typeof id, "string", "TEST_EVIDENCE_SUITE_ID_NOT_STRING");
+  assert.equal(id.includes("::"), false, `TEST_EVIDENCE_SUITE_ID_DELIMITER:${id}`);
+  if (id === "livetree/browser-raster-fidelity" || id.startsWith("livedemo/browser/")) return "browser";
+  if (id.startsWith("verification/")) return "certification";
+  if (id.startsWith("livehost/locus/") || id.startsWith("locus/")) return "locus";
+  if (id.startsWith("transform/")) return "transform";
+  if (id.startsWith("livetree/") || id.startsWith("livetree-")) return "livetree";
+  if (id.startsWith("livemap/") || id.startsWith("livemap-")) return "livemap";
+  if (id.startsWith("livehost/")) return "livehost";
+  if (id.startsWith("reflect/")) return "reflect";
+  if (id.startsWith("unit/") || id === "integration/public-boundaries") return "unit";
+  throw new Error(`TEST_EVIDENCE_SUITE_PRESENTATION_CATEGORY:${id}`);
 }
 
 function capture_directory(candidate: string): string {
@@ -98,7 +117,13 @@ function validate_report(category: Category, report: JsonObject, metadata: JsonO
   assert_unique(report.suiteRuns.map((suite: JsonObject) => suite.id), `${category.toUpperCase()}_SUITE`);
   assert_unique(report.suiteRuns.flatMap((suite: JsonObject) => suite.cases.map((item: JsonObject) => item.id)), `${category.toUpperCase()}_CASE`);
   for (const suite of report.suiteRuns) {
+    const explorerCategory = explorer_category_from_suite_id(suite.id);
+    assert.equal(category === "browser" ? explorerCategory === "browser" : category === "certification" ? explorerCategory === "certification" : explorerCategory !== "browser" && explorerCategory !== "certification", true, `TEST_EVIDENCE_SUITE_PRESENTATION_CATEGORY_MISMATCH:${suite.id}`);
     assert.deepEqual(suite.cases.map((item: JsonObject) => item.id), suite.caseOrder, `TEST_EVIDENCE_CASE_ORDER_MISMATCH:${suite.id}`);
+    for (const item of suite.cases) {
+      assert.equal(item.caseId.includes("::"), false, `TEST_EVIDENCE_CASE_ID_DELIMITER:${item.id}`);
+      assert.equal(item.id, `${suite.id}::${item.caseId}`, `TEST_EVIDENCE_CASE_OWNER_MISMATCH:${item.id}`);
+    }
     const evidenceIds = suite.evidence.map((entry: JsonObject) => entry.id);
     assert_unique(evidenceIds, `EVIDENCE:${suite.id}`);
     const referenced = [...suite.evidenceRefs, ...suite.cases.flatMap((item: JsonObject) => item.evidenceRefs)];
@@ -213,15 +238,6 @@ function suite_projection(suite: JsonObject): JsonObject {
   return projection;
 }
 
-function status_counts(items: readonly JsonObject[]): JsonObject {
-  return Object.freeze({
-    total: items.length,
-    pass: items.filter((item) => item.status === "pass").length,
-    fail: items.filter((item) => item.status === "fail").length,
-    skip: items.filter((item) => item.status === "skip").length,
-  });
-}
-
 export type MaterializationResult = Readonly<{
   candidate: string;
   siteRoot: string;
@@ -242,23 +258,19 @@ export async function materialize_test_evidence(captureCandidate: string, option
   await mkdir(evidenceRoot, { recursive: true });
   const records: ArtifactRecord[] = [];
   const reportRecords = {} as Record<Category, ArtifactRecord>;
-  const suites: JsonObject[] = [];
+  const suiteSummaries: JsonObject[] = [];
   let caseArtifactCount = 0;
   let suiteArtifactCount = 0;
+  let categoryArtifactCount = 0;
   try {
     for (const category of source.categories) {
       reportRecords[category] = await record_file(evidenceRoot, `reports/${category}.json`, source.reportBytes[category]!, records);
       for (const suite of source.reports[category]!.suiteRuns) {
+        const categoryId = explorer_category_from_suite_id(suite.id);
         const evidenceById = new Map(suite.evidence.map((entry: JsonObject) => [entry.id, entry]));
         const childReferences = new Set<string>(suite.cases.flatMap((item: JsonObject) => item.evidenceRefs));
         const ownedReferences = suite.evidenceRefs.filter((id: string) => !childReferences.has(id));
         const ownedEvidence = ownedReferences.map((id: string) => evidenceById.get(id));
-        const suitePath = `suites/${encode_artifact_id(suite.id)}.json`;
-        let suiteArtifact: ArtifactRecord | null = null;
-        if (ownedEvidence.length > 0 || suite.errors.length > 0) {
-          suiteArtifact = await record_file(evidenceRoot, suitePath, json_bytes({ category, suiteId: suite.id, suite: suite_projection(suite), evidenceRefs: ownedReferences, evidence: ownedEvidence }), records);
-          suiteArtifactCount += 1;
-        }
         const indexedCases: JsonObject[] = [];
         for (const item of suite.cases) {
           const retained = item.diagnostic !== null || item.errors.length > 0 || item.evidenceRefs.length > 0;
@@ -274,36 +286,62 @@ export async function materialize_test_evidence(captureCandidate: string, option
             evidence: caseArtifact === null ? { available: false } : { available: true, ...caseArtifact },
           });
         }
-        suites.push({
-          category, id: suite.id, title: suite.title, order: suite.order, status: suite.status, executionShape: suite.executionShape,
-          counts: suite.counts, timing: { queuedAt: suite.queuedAt, startedAt: suite.startedAt, completedAt: suite.completedAt, durationMs: suite.durationMs, ms: suite.ms },
-          evidence: suiteArtifact === null ? { available: false } : { available: true, ...suiteArtifact },
+        const hasSuiteEvidence = ownedEvidence.length > 0 || suite.errors.length > 0;
+        const suitePath = `suites/${encode_artifact_id(suite.id)}.json`;
+        const suiteArtifact = await record_file(evidenceRoot, suitePath, json_bytes({
+          categoryId,
+          category,
+          suiteId: suite.id,
           cases: indexedCases,
+          ...(hasSuiteEvidence ? { suite: suite_projection(suite), evidenceRefs: ownedReferences, evidence: ownedEvidence } : {}),
+        }), records);
+        suiteArtifactCount += 1;
+        suiteSummaries.push({
+          categoryId, category, id: suite.id, title: suite.title, order: suite.order, status: suite.status, executionShape: suite.executionShape,
+          counts: suite.counts, timing: { queuedAt: suite.queuedAt, startedAt: suite.startedAt, completedAt: suite.completedAt, durationMs: suite.durationMs, ms: suite.ms },
+          listing: { available: true, ...suiteArtifact },
+          suiteEvidenceAvailable: hasSuiteEvidence,
         });
       }
     }
-    const categories = CATEGORIES.map((category) => {
-      const report = source.reports[category];
-      if (report === undefined) return {
-        id: category, status: "cancelled", suiteCounts: status_counts([]), caseCounts: status_counts([]), summary: { cases: 0, pass: 0, fail: 0, skip: 0 },
-        timing: { startedAt: null, completedAt: null, runnerMs: null, hostMs: null }, evidenceAvailable: false, report: { available: false },
+    const categories: JsonObject[] = [];
+    for (const [order, id] of EXPLORER_CATEGORIES.entries()) {
+      const suites = suiteSummaries.filter((suite) => explorer_category_from_suite_id(suite.id) === id)
+        .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+      const categoryArtifact = await record_file(evidenceRoot, `categories/${encode_artifact_id(id)}.json`, json_bytes({ categoryId: id, suites }), records);
+      categoryArtifactCount += 1;
+      const counts = {
+        suites: suites.length,
+        cases: suites.reduce((total, suite) => total + suite.counts.total, 0),
+        pass: suites.reduce((total, suite) => total + suite.counts.passed, 0),
+        fail: suites.reduce((total, suite) => total + suite.counts.failed, 0),
+        skip: suites.reduce((total, suite) => total + suite.counts.skipped, 0),
+        unsupported: suites.reduce((total, suite) => total + suite.counts.unsupported, 0),
+        cancelled: suites.reduce((total, suite) => total + suite.counts.cancelled, 0),
       };
-      const categorySuites = suites.filter((suite) => suite.category === category);
-      const categoryCases = categorySuites.flatMap((suite) => suite.cases);
-      return {
-        id: category, status: report.run.status, suiteCounts: status_counts(report.suiteRuns), caseCounts: status_counts(categoryCases), summary: report.summary,
-        timing: { startedAt: report.run.startedAt, completedAt: report.run.completedAt, runnerMs: report.run.timing?.runnerMs ?? null, hostMs: report.run.timing?.hostMs ?? null },
-        evidenceAvailable: categorySuites.some((suite) => suite.evidence.available || suite.cases.some((item: JsonObject) => item.evidence.available)),
-        report: { ...reportRecords[category] },
-      };
-    });
+      categories.push({
+        id, title: id.toUpperCase(), order,
+        status: suites.length === 0 ? "unexecuted" : suites.some((suite) => suite.status === "fail") ? "fail" : suites.some((suite) => suite.status === "skip") ? "skip" : "pass",
+        counts,
+        timing: { durationMs: suites.reduce((total, suite) => total + (suite.timing.ms ?? suite.timing.durationMs ?? 0), 0) },
+        listing: { available: true, ...categoryArtifact },
+      });
+    }
+    const overall = {
+      suites: categories.reduce((total, category) => total + category.counts.suites, 0),
+      cases: categories.reduce((total, category) => total + category.counts.cases, 0),
+      pass: categories.reduce((total, category) => total + category.counts.pass, 0),
+      fail: categories.reduce((total, category) => total + category.counts.fail, 0),
+      skip: categories.reduce((total, category) => total + category.counts.skip, 0),
+      unsupported: categories.reduce((total, category) => total + category.counts.unsupported, 0),
+      cancelled: categories.reduce((total, category) => total + category.counts.cancelled, 0),
+    };
     const index = {
       deployment: source.metadata.deployment,
       capture: { candidateId: basename(source.candidate), capturedAt: source.metadata.capturedAt },
       accounting: source.accounting,
-      selectionCategories: [...CATEGORIES],
+      overall,
       categories,
-      suites,
     };
     const indexRecord = await record_file(evidenceRoot, "index.json", json_bytes(index), records);
     const artifactSet = { fileCount: records.length, rawBytes: records.reduce((total, entry) => total + entry.rawBytes, 0), sha256: artifact_tuple_digest(records) };
@@ -328,7 +366,7 @@ export async function materialize_test_evidence(captureCandidate: string, option
     await atomic_write(join(evidenceRoot, "provenance.json"), json_bytes(provenance));
     const verification = await verify_materialized_evidence(source, evidenceRoot);
     await atomic_write(join(candidate, "accepted.json"), json_bytes({ accepted: true, evidenceRoot: publicRoot, artifactSet: artifactSet.sha256 }));
-    return Object.freeze({ candidate, siteRoot, evidenceRoot, publicRoot, index: { ...index, rawBytes: indexRecord.rawBytes }, provenance, verification: { ...verification, caseArtifactCount, suiteArtifactCount } });
+    return Object.freeze({ candidate, siteRoot, evidenceRoot, publicRoot, index: { ...index, rawBytes: indexRecord.rawBytes }, provenance, verification: { ...verification, caseArtifactCount, suiteArtifactCount, categoryArtifactCount } });
   } catch (error) {
     throw new Error(`TEST_EVIDENCE_MATERIALIZATION_INCOMPLETE:${candidate}`, { cause: error });
   }
@@ -356,51 +394,101 @@ export async function verify_materialized_evidence(source: ValidatedCapture, evi
   assert.deepEqual(index.accounting, source.accounting, "TEST_EVIDENCE_INDEX_ACCOUNTING_MUTATED");
   assert.deepEqual(provenance.accounting, source.accounting, "TEST_EVIDENCE_PROVENANCE_ACCOUNTING_MUTATED");
   const sourceSuites = source.categories.flatMap((category) => source.reports[category]!.suiteRuns.map((suite: JsonObject) => ({ category, suite })));
-  assert.equal(index.suites.length, sourceSuites.length, "TEST_EVIDENCE_INDEX_SUITE_OMISSION");
-  assert.deepEqual(index.suites.map((suite: JsonObject) => `${suite.category}\0${suite.id}`), sourceSuites.map(({ category, suite }) => `${category}\0${suite.id}`), "TEST_EVIDENCE_INDEX_SUITE_ORDER_MUTATED");
+  assert.deepEqual(index.categories.map((entry: JsonObject) => entry.id), [...EXPLORER_CATEGORIES], "TEST_EVIDENCE_INDEX_CATEGORY_ORDER_MUTATED");
   let sourceEvidenceCount = 0;
   let projectedEvidenceCount = 0;
   let sourceCaseCount = 0;
-  for (const { category, suite } of sourceSuites) {
-    const indexed = index.suites.find((entry: JsonObject) => entry.category === category && entry.id === suite.id);
-    assert.ok(indexed, `TEST_EVIDENCE_INDEX_SUITE_MISSING:${suite.id}`);
-    assert.equal(indexed.status, suite.status, `TEST_EVIDENCE_SUITE_STATUS_MUTATED:${suite.id}`);
-    assert.deepEqual(indexed.counts, suite.counts, `TEST_EVIDENCE_SUITE_COUNTS_MUTATED:${suite.id}`);
-    assert.deepEqual(indexed.cases.map((item: JsonObject) => item.id), suite.cases.map((item: JsonObject) => item.id), `TEST_EVIDENCE_INDEX_CASE_ORDER_MUTATED:${suite.id}`);
-    const evidenceById = new Map(suite.evidence.map((entry: JsonObject) => [entry.id, entry]));
-    const childRefs = new Set<string>(suite.cases.flatMap((item: JsonObject) => item.evidenceRefs));
-    const suiteRefs = suite.evidenceRefs.filter((id: string) => !childRefs.has(id));
-    sourceEvidenceCount += suite.evidence.length;
-    sourceCaseCount += suite.cases.length;
-    if (suiteRefs.length > 0 || suite.errors.length > 0) {
-      assert.equal(indexed.evidence.available, true, `TEST_EVIDENCE_SUITE_ARTIFACT_MISSING:${suite.id}`);
-      const artifactBytes = await readFile(join(evidenceRoot, indexed.evidence.path));
-      assert.equal(artifactBytes.byteLength, indexed.evidence.rawBytes, `TEST_EVIDENCE_SUITE_SIZE_MISMATCH:${suite.id}`);
-      assert.equal(sha256(artifactBytes), indexed.evidence.sha256, `TEST_EVIDENCE_SUITE_HASH_MISMATCH:${suite.id}`);
-      const artifact = JSON.parse(artifactBytes.toString("utf8"));
+  const seenSuites = new Set<string>();
+  const seenCases = new Set<string>();
+  for (const [categoryOrder, explorerCategory] of EXPLORER_CATEGORIES.entries()) {
+    const indexedCategory = index.categories[categoryOrder];
+    const expectedCategoryPath = `categories/${encode_artifact_id(explorerCategory)}.json`;
+    assert.equal(indexedCategory.listing.path, expectedCategoryPath, `TEST_EVIDENCE_CATEGORY_PATH_MUTATED:${explorerCategory}`);
+    const categoryBytes = await readFile(join(evidenceRoot, indexedCategory.listing.path));
+    assert.equal(categoryBytes.byteLength, indexedCategory.listing.rawBytes, `TEST_EVIDENCE_CATEGORY_SIZE_MISMATCH:${explorerCategory}`);
+    assert.equal(sha256(categoryBytes), indexedCategory.listing.sha256, `TEST_EVIDENCE_CATEGORY_HASH_MISMATCH:${explorerCategory}`);
+      const categoryArtifact = JSON.parse(categoryBytes.toString("utf8"));
+    assert.equal(categoryArtifact.categoryId, explorerCategory, `TEST_EVIDENCE_CATEGORY_ID_MUTATED:${explorerCategory}`);
+    const expectedSuites = sourceSuites.filter(({ suite }) => explorer_category_from_suite_id(suite.id) === explorerCategory)
+      .sort((a, b) => a.suite.order - b.suite.order || a.suite.id.localeCompare(b.suite.id));
+    assert.deepEqual(categoryArtifact.suites.map((entry: JsonObject) => entry.id), expectedSuites.map(({ suite }) => suite.id), `TEST_EVIDENCE_CATEGORY_SUITE_ORDER_MUTATED:${explorerCategory}`);
+    const expectedCounts = {
+      suites: expectedSuites.length,
+      cases: expectedSuites.reduce((total, { suite }) => total + suite.counts.total, 0),
+      pass: expectedSuites.reduce((total, { suite }) => total + suite.counts.passed, 0),
+      fail: expectedSuites.reduce((total, { suite }) => total + suite.counts.failed, 0),
+      skip: expectedSuites.reduce((total, { suite }) => total + suite.counts.skipped, 0),
+      unsupported: expectedSuites.reduce((total, { suite }) => total + suite.counts.unsupported, 0),
+      cancelled: expectedSuites.reduce((total, { suite }) => total + suite.counts.cancelled, 0),
+    };
+    assert.deepEqual(indexedCategory.counts, expectedCounts, `TEST_EVIDENCE_CATEGORY_COUNTS_MUTATED:${explorerCategory}`);
+    for (const { category, suite } of expectedSuites) {
+      assert.equal(seenSuites.has(suite.id), false, `TEST_EVIDENCE_DUPLICATE_INDEXED_SUITE:${suite.id}`);
+      seenSuites.add(suite.id);
+      const indexed = categoryArtifact.suites.find((entry: JsonObject) => entry.id === suite.id);
+      assert.ok(indexed, `TEST_EVIDENCE_CATEGORY_SUITE_MISSING:${suite.id}`);
+      assert.equal(indexed.categoryId, explorerCategory, `TEST_EVIDENCE_SUITE_PRESENTATION_CATEGORY_MUTATED:${suite.id}`);
+      assert.equal(indexed.category, category, `TEST_EVIDENCE_SUITE_CATEGORY_MUTATED:${suite.id}`);
+      assert.equal(indexed.status, suite.status, `TEST_EVIDENCE_SUITE_STATUS_MUTATED:${suite.id}`);
+      assert.deepEqual(indexed.counts, suite.counts, `TEST_EVIDENCE_SUITE_COUNTS_MUTATED:${suite.id}`);
+      const expectedSuitePath = `suites/${encode_artifact_id(suite.id)}.json`;
+      assert.equal(indexed.listing.path, expectedSuitePath, `TEST_EVIDENCE_SUITE_PATH_MUTATED:${suite.id}`);
+      const suiteBytes = await readFile(join(evidenceRoot, indexed.listing.path));
+      assert.equal(suiteBytes.byteLength, indexed.listing.rawBytes, `TEST_EVIDENCE_SUITE_SIZE_MISMATCH:${suite.id}`);
+      assert.equal(sha256(suiteBytes), indexed.listing.sha256, `TEST_EVIDENCE_SUITE_HASH_MISMATCH:${suite.id}`);
+      const artifact = JSON.parse(suiteBytes.toString("utf8"));
+      assert.equal(artifact.categoryId, explorerCategory, `TEST_EVIDENCE_SUITE_PRESENTATION_CATEGORY_MUTATED:${suite.id}`);
+      assert.equal(artifact.category, category, `TEST_EVIDENCE_SUITE_CATEGORY_MUTATED:${suite.id}`);
       assert.equal(artifact.suiteId, suite.id, `TEST_EVIDENCE_SUITE_ID_MUTATED:${suite.id}`);
-      assert.deepEqual(artifact.evidence, suiteRefs.map((id: string) => evidenceById.get(id)), `TEST_EVIDENCE_SUITE_EVIDENCE_MUTATED:${suite.id}`);
-      projectedEvidenceCount += artifact.evidence.length;
-    } else assert.equal(indexed.evidence.available, false, `TEST_EVIDENCE_SUITE_ARTIFACT_INVENTED:${suite.id}`);
-    for (const item of suite.cases) {
-      const indexedCase = indexed.cases.find((entry: JsonObject) => entry.id === item.id);
-      assert.ok(indexedCase, `TEST_EVIDENCE_INDEX_CASE_MISSING:${item.id}`);
-      assert.equal(indexedCase.status, item.status, `TEST_EVIDENCE_CASE_STATUS_MUTATED:${item.id}`);
-      const retained = item.diagnostic !== null || item.errors.length > 0 || item.evidenceRefs.length > 0;
-      assert.equal(indexedCase.evidence.available, retained, `TEST_EVIDENCE_CASE_AVAILABILITY_MUTATED:${item.id}`);
-      if (retained) {
-        const artifactBytes = await readFile(join(evidenceRoot, indexedCase.evidence.path));
-        assert.equal(artifactBytes.byteLength, indexedCase.evidence.rawBytes, `TEST_EVIDENCE_CASE_SIZE_MISMATCH:${item.id}`);
-        assert.equal(sha256(artifactBytes), indexedCase.evidence.sha256, `TEST_EVIDENCE_CASE_HASH_MISMATCH:${item.id}`);
-        const artifact = JSON.parse(artifactBytes.toString("utf8"));
-        assert.equal(artifact.caseId, item.id, `TEST_EVIDENCE_CASE_ID_MUTATED:${item.id}`);
-        assert.deepEqual(artifact.case, item, `TEST_EVIDENCE_CASE_MUTATED:${item.id}`);
-        assert.deepEqual(artifact.evidence, item.evidenceRefs.map((id: string) => evidenceById.get(id)), `TEST_EVIDENCE_CASE_EVIDENCE_MUTATED:${item.id}`);
+      assert.deepEqual(artifact.cases.map((item: JsonObject) => item.id), suite.cases.map((item: JsonObject) => item.id), `TEST_EVIDENCE_SUITE_CASE_ORDER_MUTATED:${suite.id}`);
+      const evidenceById = new Map(suite.evidence.map((entry: JsonObject) => [entry.id, entry]));
+      const childRefs = new Set<string>(suite.cases.flatMap((item: JsonObject) => item.evidenceRefs));
+      const suiteRefs = suite.evidenceRefs.filter((id: string) => !childRefs.has(id));
+      const hasSuiteEvidence = suiteRefs.length > 0 || suite.errors.length > 0;
+      assert.equal(indexed.suiteEvidenceAvailable, hasSuiteEvidence, `TEST_EVIDENCE_SUITE_AVAILABILITY_MUTATED:${suite.id}`);
+      assert.equal(artifact.suite !== undefined, hasSuiteEvidence, `TEST_EVIDENCE_SUITE_DETAIL_PARTITION:${suite.id}`);
+      sourceEvidenceCount += suite.evidence.length;
+      sourceCaseCount += suite.cases.length;
+      if (hasSuiteEvidence) {
+        assert.deepEqual(artifact.suite, suite_projection(suite), `TEST_EVIDENCE_SUITE_MUTATED:${suite.id}`);
+        assert.deepEqual(artifact.evidenceRefs, suiteRefs, `TEST_EVIDENCE_SUITE_REFS_MUTATED:${suite.id}`);
+        assert.deepEqual(artifact.evidence, suiteRefs.map((id: string) => evidenceById.get(id)), `TEST_EVIDENCE_SUITE_EVIDENCE_MUTATED:${suite.id}`);
         projectedEvidenceCount += artifact.evidence.length;
+      } else {
+        assert.equal(artifact.evidenceRefs, undefined, `TEST_EVIDENCE_SUITE_REFS_INVENTED:${suite.id}`);
+        assert.equal(artifact.evidence, undefined, `TEST_EVIDENCE_SUITE_EVIDENCE_INVENTED:${suite.id}`);
+      }
+      for (const item of suite.cases) {
+        assert.equal(seenCases.has(item.id), false, `TEST_EVIDENCE_DUPLICATE_INDEXED_CASE:${item.id}`);
+        seenCases.add(item.id);
+        const indexedCase = artifact.cases.find((entry: JsonObject) => entry.id === item.id);
+        assert.ok(indexedCase, `TEST_EVIDENCE_SUITE_CASE_MISSING:${item.id}`);
+        assert.equal(indexedCase.status, item.status, `TEST_EVIDENCE_CASE_STATUS_MUTATED:${item.id}`);
+        const retained = item.diagnostic !== null || item.errors.length > 0 || item.evidenceRefs.length > 0;
+        assert.equal(indexedCase.evidence.available, retained, `TEST_EVIDENCE_CASE_AVAILABILITY_MUTATED:${item.id}`);
+        if (retained) {
+          const expectedCasePath = `cases/${encode_artifact_id(item.id)}.json`;
+          assert.equal(indexedCase.evidence.path, expectedCasePath, `TEST_EVIDENCE_CASE_PATH_MUTATED:${item.id}`);
+          const caseBytes = await readFile(join(evidenceRoot, indexedCase.evidence.path));
+          assert.equal(caseBytes.byteLength, indexedCase.evidence.rawBytes, `TEST_EVIDENCE_CASE_SIZE_MISMATCH:${item.id}`);
+          assert.equal(sha256(caseBytes), indexedCase.evidence.sha256, `TEST_EVIDENCE_CASE_HASH_MISMATCH:${item.id}`);
+          const caseArtifact = JSON.parse(caseBytes.toString("utf8"));
+          assert.equal(caseArtifact.category, category, `TEST_EVIDENCE_CASE_CATEGORY_MUTATED:${item.id}`);
+          assert.equal(caseArtifact.suiteId, suite.id, `TEST_EVIDENCE_CASE_SUITE_MUTATED:${item.id}`);
+          assert.equal(caseArtifact.caseId, item.id, `TEST_EVIDENCE_CASE_ID_MUTATED:${item.id}`);
+          assert.deepEqual(caseArtifact.case, item, `TEST_EVIDENCE_CASE_MUTATED:${item.id}`);
+          assert.deepEqual(caseArtifact.evidence, item.evidenceRefs.map((id: string) => evidenceById.get(id)), `TEST_EVIDENCE_CASE_EVIDENCE_MUTATED:${item.id}`);
+          projectedEvidenceCount += caseArtifact.evidence.length;
+        }
       }
     }
   }
-  assert.equal(index.suites.flatMap((suite: JsonObject) => suite.cases).length, sourceCaseCount, "TEST_EVIDENCE_INDEX_CASE_OMISSION");
+  assert.equal(seenSuites.size, sourceSuites.length, "TEST_EVIDENCE_INDEX_SUITE_OMISSION");
+  assert.equal(seenCases.size, sourceCaseCount, "TEST_EVIDENCE_INDEX_CASE_OMISSION");
+  assert.deepEqual(index.overall, index.categories.reduce((totals: JsonObject, category: JsonObject) => {
+    for (const key of Object.keys(totals)) totals[key] += category.counts[key];
+    return totals;
+  }, { suites: 0, cases: 0, pass: 0, fail: 0, skip: 0, unsupported: 0, cancelled: 0 }), "TEST_EVIDENCE_INDEX_OVERALL_MUTATED");
   assert.equal(projectedEvidenceCount, sourceEvidenceCount, "TEST_EVIDENCE_RETAINED_EVIDENCE_PARTITION");
   for (const category of source.categories) {
     const bytes = await readFile(join(evidenceRoot, `reports/${category}.json`));
@@ -420,18 +508,22 @@ export async function verify_materialized_evidence(source: ValidatedCapture, evi
 
 export async function measure_package(result: MaterializationResult): Promise<JsonObject> {
   const index = await parse_json(join(result.evidenceRoot, "index.json"));
-  const caseRecords = index.suites.flatMap((suite: JsonObject) => suite.cases.map((item: JsonObject) => item.evidence).filter((entry: JsonObject) => entry.available));
-  const suiteRecords = index.suites.map((suite: JsonObject) => suite.evidence).filter((entry: JsonObject) => entry.available);
-  const fullReports = index.categories.map((entry: JsonObject) => entry.report).filter((entry: JsonObject) => entry?.available !== false);
+  const categoryRecords = index.categories.map((entry: JsonObject) => entry.listing);
+  const categoryArtifacts = await Promise.all(categoryRecords.map((entry: JsonObject) => parse_json(join(result.evidenceRoot, entry.path))));
+  const suiteRecords = categoryArtifacts.flatMap((artifact: JsonObject) => artifact.suites.map((suite: JsonObject) => suite.listing));
+  const suiteArtifacts = await Promise.all(suiteRecords.map((entry: JsonObject) => parse_json(join(result.evidenceRoot, entry.path))));
+  const caseRecords = suiteArtifacts.flatMap((artifact: JsonObject) => artifact.cases.map((item: JsonObject) => item.evidence).filter((entry: JsonObject) => entry.available));
+  const fullReports = Object.values(result.provenance.runs).map((run: any) => ({ path: run.reportPath, rawBytes: run.reportBytes, sha256: run.reportSha256 }));
   const allFiles = await list_files(result.evidenceRoot);
   const completeBytes = (await Promise.all(allFiles.map((path) => stat(join(result.evidenceRoot, path))))).reduce((total, item) => total + item.size, 0);
   const largest = (records: JsonObject[]) => records.reduce((current, entry) => entry.rawBytes > current.rawBytes ? entry : current, { rawBytes: 0 });
   return Object.freeze({
     indexRawBytes: (await stat(join(result.evidenceRoot, "index.json"))).size,
+    categoryArtifacts: { count: categoryRecords.length, rawBytes: categoryRecords.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(categoryRecords) },
     caseArtifacts: { count: caseRecords.length, rawBytes: caseRecords.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(caseRecords) },
     suiteArtifacts: { count: suiteRecords.length, rawBytes: suiteRecords.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(suiteRecords) },
-    fullReports: { rawBytes: fullReports.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(fullReports), entries: Object.fromEntries(index.categories.filter((entry: JsonObject) => entry.report?.available !== false).map((entry: JsonObject) => [entry.id, entry.report])) },
-    lazyArtifactRawBytes: [...caseRecords, ...suiteRecords].reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0),
+    fullReports: { rawBytes: fullReports.reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0), largest: largest(fullReports), entries: Object.fromEntries(Object.entries(result.provenance.runs).map(([id, run]: [string, any]) => [id, { path: run.reportPath, rawBytes: run.reportBytes, sha256: run.reportSha256 }])) },
+    lazyArtifactRawBytes: [...categoryRecords, ...caseRecords, ...suiteRecords].reduce((total: number, entry: JsonObject) => total + entry.rawBytes, 0),
     completePackageRawBytes: completeBytes,
   });
 }

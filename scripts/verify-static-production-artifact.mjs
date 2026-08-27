@@ -11,12 +11,43 @@ function files(directory) {
   });
 }
 
-function public_references(index) {
-  return index.suites.flatMap((suite) => [suite.evidence, ...suite.cases.map((item) => item.evidence)])
-    .filter((reference) => reference?.available === true);
+function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
+
+function public_json(publicRoot, reference, kind) {
+  if (typeof reference?.path !== "string" || !new RegExp(`^${kind}/[A-Za-z0-9_-]+\\.json$`).test(reference.path)) throw new Error(`Public frozen index has an invalid ${kind} path.`);
+  const path = resolve(publicRoot, reference.path);
+  if (!path.startsWith(`${publicRoot}/`) || !existsSync(path)) throw new Error(`Public frozen artifact is missing: ${reference.path}.`);
+  const bytes = readFileSync(path);
+  if (bytes.byteLength !== reference.rawBytes || sha256(bytes) !== reference.sha256 || statSync(path).size !== reference.rawBytes) throw new Error(`Public frozen artifact metadata mismatch: ${reference.path}.`);
+  return { path: reference.path, bytes, value: JSON.parse(bytes.toString("utf8")) };
 }
 
-function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
+function public_references(index, publicRoot) {
+  const records = [];
+  const suites = new Set();
+  const cases = new Set();
+  for (const category of index.categories ?? []) {
+    const categoryRecord = public_json(publicRoot, category.listing, "categories");
+    if (categoryRecord.value.categoryId !== category.id) throw new Error(`Public frozen category identity mismatch: ${category.id}.`);
+    records.push(categoryRecord);
+    for (const suite of categoryRecord.value.suites ?? []) {
+      if (suite.categoryId !== category.id || suites.has(suite.id)) throw new Error(`Public frozen suite category or identity mismatch: ${suite.id}.`);
+      suites.add(suite.id);
+      const suiteRecord = public_json(publicRoot, suite.listing, "suites");
+      if (suiteRecord.value.categoryId !== category.id || suiteRecord.value.suiteId !== suite.id) throw new Error(`Public frozen suite envelope identity mismatch: ${suite.id}.`);
+      records.push(suiteRecord);
+      for (const item of suiteRecord.value.cases ?? []) {
+        if (cases.has(item.id) || item.id !== `${suite.id}::${item.caseId}`) throw new Error(`Public frozen case identity mismatch: ${item.id}.`);
+        cases.add(item.id);
+        if (item.evidence?.available !== true) continue;
+        const caseRecord = public_json(publicRoot, item.evidence, "cases");
+        if (caseRecord.value.suiteId !== suite.id || caseRecord.value.caseId !== item.id) throw new Error(`Public frozen case envelope identity mismatch: ${item.id}.`);
+        records.push(caseRecord);
+      }
+    }
+  }
+  return records;
+}
 
 export function verify_static_production_artifact(options = {}) {
   const root = resolve(import.meta.dirname, "..");
@@ -42,16 +73,11 @@ export function verify_static_production_artifact(options = {}) {
 
   const index = JSON.parse(readFileSync(resolve(publicRoot, "index.json"), "utf8"));
   if (JSON.stringify(index).includes("reports/")) throw new Error("Public frozen index references an omitted canonical report.");
-  const references = public_references(index);
-  let rowBytes = 0;
-  for (const reference of references) {
-    if (typeof reference.path !== "string" || !/^(?:cases|suites)\/[A-Za-z0-9_-]+\.json$/.test(reference.path)) throw new Error("Public frozen index has an invalid row evidence path.");
-    const path = resolve(publicRoot, reference.path);
-    if (!path.startsWith(`${publicRoot}/`) || !existsSync(path)) throw new Error(`Public frozen row artifact is missing: ${reference.path}.`);
-    const bytes = readFileSync(path);
-    if (bytes.byteLength !== reference.rawBytes || sha256(bytes) !== reference.sha256 || statSync(path).size !== reference.rawBytes) throw new Error(`Public frozen row artifact metadata mismatch: ${reference.path}.`);
-    rowBytes += bytes.byteLength;
-  }
+  const references = public_references(index, publicRoot);
+  const rowBytes = references.reduce((total, record) => total + record.bytes.byteLength, 0);
+  const referenced = new Set(["index.json", ...references.map((record) => record.path)]);
+  const actualEvidenceFiles = files(publicRoot).map((path) => path.slice(publicRoot.length + 1));
+  if (actualEvidenceFiles.some((path) => !referenced.has(path))) throw new Error("Static production artifact contains an unreferenced public frozen artifact.");
   return Object.freeze({ evidenceRoot: evidence.root, frozenPanelSources: frozenPanelSources.length, rowArtifacts: references.length, rowBytes });
 }
 
