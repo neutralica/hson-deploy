@@ -20,7 +20,7 @@
     "preflight:static-production": "npm run verify:runtime && node scripts/preflight-static-production.mjs",
     "assemble:static-test-evidence": "node scripts/assemble-static-test-evidence.mjs",
     "verify:static-production-artifact": "node scripts/verify-static-production-artifact.mjs",
-    "test:static-production-evidence": "node --test scripts/static-test-evidence-config.test.mjs scripts/assemble-static-test-evidence.test.mjs scripts/verify-static-production-artifact.test.mjs",
+    "test:static-production-evidence": "node --test scripts/static-test-evidence-config.test.mjs scripts/livehost-browser-config.test.mjs scripts/assemble-static-test-evidence.test.mjs scripts/verify-static-production-artifact.test.mjs",
     "test:preflight:cloudflare": "node --test scripts/preflight-cloudflare.test.mjs",
     "test:subs:update": "node --test scripts/update-submodule.test.mjs",
     "verify:submodules": "node scripts/verify-submodules.mjs",

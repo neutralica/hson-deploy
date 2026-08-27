@@ -21,7 +21,7 @@ export function execute_deploy(options = {}) {
   const log = options.log ?? console.log;
 
   const inspectReuse = options.inspectReuse ?? inspect_reusable_certified_artifact;
-  let reuse = inspectReuse({ deploymentRoot });
+  let reuse = inspectReuse({ deploymentRoot, environment });
   const reusedExisting = reuse.valid;
   if (reuse.valid) {
     log(`Certified artifact ........ VALID`);
@@ -32,7 +32,7 @@ export function execute_deploy(options = {}) {
   } else {
     log(`No valid certified artifact is available (${reuse.reason}); certifying the currently pinned deployment revision.`);
     run("npm", ["run", "certify"], { cwd: deploymentRoot, env: environment });
-    reuse = inspectReuse({ deploymentRoot });
+    reuse = inspectReuse({ deploymentRoot, environment });
     if (!reuse.valid) {
       throw new Error(`Certification completed without a valid certified artifact: ${reuse.reason}.`);
     }
@@ -52,7 +52,7 @@ export function execute_deploy_latest(options = {}) {
   run("npm", ["run", "subs:update"], { cwd: deploymentRoot, env: environment });
   run("npm", ["run", "verify"], { cwd: deploymentRoot, env: environment });
 
-  let reuse = inspectReuse({ deploymentRoot });
+  let reuse = inspectReuse({ deploymentRoot, environment });
   const reusedExisting = reuse.valid && reuse.freshness === "current";
   if (reusedExisting) {
     log(`Reusing current certified static artifact for ${reuse.certifiedDeploymentCommit}.`);
@@ -62,7 +62,7 @@ export function execute_deploy_latest(options = {}) {
       : reuse.reason;
     log(`No valid current-source certification is available (${reason}); certifying the synchronized deployment revision.`);
     run("npm", ["run", "certify"], { cwd: deploymentRoot, env: environment });
-    reuse = inspectReuse({ deploymentRoot });
+    reuse = inspectReuse({ deploymentRoot, environment });
     if (!reuse.valid || reuse.freshness !== "current") {
       const result = reuse.valid ? `artifact freshness is ${reuse.freshness}` : reuse.reason;
       throw new Error(`Certification completed without a valid current-source certified artifact: ${result}.`);

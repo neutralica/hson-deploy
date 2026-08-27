@@ -40,6 +40,7 @@ export function accepted_evidence_candidates(deploymentRoot, evidenceRoot) {
 export function resolve_static_artifact_verification(options = {}) {
   const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
   const artifact = resolve(options.artifact ?? join(deploymentRoot, "static-production"));
+  const suppliedEnvironment = options.environment ?? process.env;
   const roots = artifact_evidence_roots(artifact);
   if (roots.length !== 1) {
     throw new Error(`Static production artifact must contain exactly one immutable test-evidence root; found ${roots.length}.`);
@@ -61,13 +62,17 @@ export function resolve_static_artifact_verification(options = {}) {
     const environment = {
       VITE_TEST_EVIDENCE_ROOT: evidenceRoot,
       TEST_EVIDENCE_ACCEPTANCE_FILE: candidate.path,
+      ...(suppliedEnvironment.VITE_LIVEHOST_WS_URL === undefined
+        ? {}
+        : { VITE_LIVEHOST_WS_URL: suppliedEnvironment.VITE_LIVEHOST_WS_URL }),
     };
     try {
       const verification = verify_static_production_artifact({ artifact, environment });
       return Object.freeze({ deploymentRoot, artifact, evidenceRoot, acceptanceFile: candidate.path, artifactSetSha256: candidate.value.artifactSet, environment, verification });
     } catch (cause) { lastError = cause; }
   }
-  throw new Error(`Static production artifact does not match any accepted materialization for ${evidenceRoot}.`, { cause: lastError });
+  const detail = lastError instanceof Error ? ` ${lastError.message}` : "";
+  throw new Error(`Static production artifact does not match any accepted materialization for ${evidenceRoot}.${detail}`, { cause: lastError });
 }
 
 function git_head(deploymentRoot) {
@@ -96,6 +101,7 @@ export function inspect_reusable_certified_artifact(options = {}) {
       deploymentRoot,
       artifact,
       evidenceArtifactSetSha256: receipt.evidenceArtifactSetSha256,
+      environment: options.environment,
     });
     if (authority.artifactSetSha256 !== receipt.evidenceArtifactSetSha256 || !EVIDENCE_ROOT_PATTERN.test(authority.evidenceRoot.slice(1))) {
       return Object.freeze({ valid: false, reason: "certification and evidence identity do not match" });

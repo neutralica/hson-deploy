@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { validate_accepted_static_test_evidence } from "./static-test-evidence-config.mjs";
+import { validate_livehost_browser_configuration } from "./livehost-browser-config.mjs";
 
 function files(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -54,6 +55,7 @@ export function verify_static_production_artifact(options = {}) {
   const artifact = resolve(options.artifact ?? resolve(root, "static-production"));
   const environment = options.environment ?? process.env;
   const evidence = validate_accepted_static_test_evidence(environment);
+  const liveHost = validate_livehost_browser_configuration(environment);
   const publicRoot = resolve(artifact, evidence.root.slice(1));
   if (!existsSync(resolve(artifact, "index.html"))) throw new Error("Static production artifact is missing static-production/index.html.");
   if (!existsSync(resolve(publicRoot, "index.json"))) throw new Error("Static production artifact is missing its public frozen index.");
@@ -65,9 +67,28 @@ export function verify_static_production_artifact(options = {}) {
   if (embeddedRoots.some((commit) => commit !== evidence.deploymentCommit)) throw new Error("Static production artifact contains a stale test-evidence root.");
   if (sources.some((source) => /\/test-evidence\/(?:latest|current)(?:[/?#"']|$)/i.test(source))) throw new Error("Static production artifact contains a mutable test-evidence root.");
 
+  const liveClientSources = sources.filter((source) => source.includes(liveHost.configured));
+  if (liveClientSources.length === 0) {
+    throw new Error("Static production artifact does not contain the configured VITE_LIVEHOST_WS_URL.");
+  }
+  if (!liveClientSources.some((source) => source.includes("/towl") && source.includes("/circuit-verification"))) {
+    throw new Error("Static production artifact does not bind the configured LiveHost origin to the expected live application routes.");
+  }
+  for (const obsolete of ["VITE_HOSTED_TEST_WS_URL", "VITE_TOWL_WS_URL", "VITE_CIRCUIT_VERIFICATION_WS_URL"]) {
+    if (sources.some((source) => source.includes(obsolete))) {
+      throw new Error(`Static production artifact retains obsolete LiveHost configuration marker: ${obsolete}.`);
+    }
+  }
+  const unconditionalTowlLoopback = sources.some((source) => (
+    /(?:const|let|var)\s+[A-Za-z_$][\w$]*=["']ws:\/\/127\.0\.0\.1:8787["'][\s\S]{0,220}\.pathname=["']\/towl["']/.test(source)
+  ));
+  if (!liveHost.localSimulation && unconditionalTowlLoopback) {
+    throw new Error("Static production artifact contains an unconditional TOWL loopback endpoint.");
+  }
+
   const frozenPanelSources = sources.filter((source) => source.includes("data-frozen-panel-state") || source.includes("frozen-test-panel"));
   if (frozenPanelSources.length === 0) throw new Error("Static production artifact is missing the frozen test panel chunk.");
-  for (const forbidden of ["tests.discover", "tests.runSelected", "tests.inspect", "tests.cancel", "make_remote_hosted_test_runtime", "HostedTestPanelRuntime", "HostedTestPanelAdapter", "VITE_HOSTED_TEST_WS_URL"]) {
+  for (const forbidden of ["tests.discover", "tests.runSelected", "tests.inspect", "tests.cancel", "make_remote_hosted_test_runtime", "HostedTestPanelRuntime", "HostedTestPanelAdapter"]) {
     if (frozenPanelSources.some((source) => source.includes(forbidden))) throw new Error(`Frozen test panel production chunk retains live hosted-test acquisition marker: ${forbidden}.`);
   }
 
@@ -78,10 +99,10 @@ export function verify_static_production_artifact(options = {}) {
   const referenced = new Set(["index.json", ...references.map((record) => record.path)]);
   const actualEvidenceFiles = files(publicRoot).map((path) => path.slice(publicRoot.length + 1));
   if (actualEvidenceFiles.some((path) => !referenced.has(path))) throw new Error("Static production artifact contains an unreferenced public frozen artifact.");
-  return Object.freeze({ evidenceRoot: evidence.root, frozenPanelSources: frozenPanelSources.length, rowArtifacts: references.length, rowBytes });
+  return Object.freeze({ evidenceRoot: evidence.root, liveHostOrigin: liveHost.origin, frozenPanelSources: frozenPanelSources.length, rowArtifacts: references.length, rowBytes });
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const result = verify_static_production_artifact();
-  console.log(`Static production artifact: ${result.rowArtifacts} frozen row artifacts match raw bytes; exact root ${result.evidenceRoot} is embedded and its panel chunk excludes hosted-test acquisition.`);
+  console.log(`Static production artifact: ${result.rowArtifacts} frozen row artifacts match raw bytes; exact root ${result.evidenceRoot} and LiveHost origin ${result.liveHostOrigin} are embedded; the frozen panel excludes hosted-test acquisition.`);
 }

@@ -2,7 +2,7 @@
 
 ## Node hosted authority (default)
 
-The ordinary hosted authority is the persistent Node service, not the Worker.
+The ordinary hosted authority is the persistent public Node service, not the Worker.
 `npm run prepare:node-production` performs the repository-side preparation
 only:
 
@@ -46,6 +46,8 @@ than the current source checkout. If no valid certified artifact is available,
 it runs the existing `certify` command for the currently pinned source,
 validates the result, and finally invokes `deploy:static`. It never runs
 `subs:update` or workspace verification and does not prepare or mutate source.
+The operator supplies the same `VITE_LIVEHOST_WS_URL` used to build the artifact
+so reuse verification can prove that exact browser-visible origin is embedded.
 
 `npm run deploy:latest` is the separate source-advancing intention. It runs
 `subs:update`, verifies the synchronized workspace, reuses the artifact only
@@ -75,6 +77,7 @@ Build it from an accepted Phase 3 materialization:
 ```sh
 VITE_TEST_EVIDENCE_ROOT=/test-evidence/<exact-40-hex-hson-deploy-commit> \
 TEST_EVIDENCE_ACCEPTANCE_FILE=/absolute/path/to/accepted.json \
+VITE_LIVEHOST_WS_URL=wss://<node-livehost-origin> \
 npm run prepare:static-production
 ```
 
@@ -82,20 +85,22 @@ This command validates the accepted immutable evidence root, builds a
 deployment-owned Vite artifact in `static-production/`, promotes only the public
 index and indexed case/suite row artifacts, and verifies their raw bytes. It does
 not deploy or publish the artifact. The public frozen test explorer uses ordinary
-HTTP and does not require `VITE_HOSTED_TEST_WS_URL`, a hosted-test WebSocket, or
-visitor-triggered execution. Complete semantic, browser, and certification
+HTTP and does not initiate a hosted-test WebSocket or visitor-triggered
+execution. Complete semantic, browser, and certification
 reports—and `provenance.json`—remain in the accepted build/archive materialization.
 
-`VITE_HOSTED_TEST_WS_URL` is still an optional shared live endpoint for existing
-TOWL and circuit-verification clients when their explicit `VITE_TOWL_WS_URL` and
-`VITE_CIRCUIT_VERIFICATION_WS_URL` overrides are absent. That coupling is not a
-hosted-test requirement of the frozen public panel. Live/internal test execution,
-LiveHost, and Locus/report authorities remain separate certification capabilities.
+`VITE_LIVEHOST_WS_URL` is the browser-visible WebSocket origin of the deployed
+Node/LiveHost service. It must not contain an application path. TOWL derives
+`/towl`; circuit verification derives `/circuit-verification`; both first use
+the runtime's anonymous `GET /session` admission endpoint. The frozen public
+Tests panel never opens a runtime route at visitor runtime. Public production requires `wss://`; explicit
+localhost, `127.0.0.1`, and `[::1]` `ws://` values are reserved for local
+production simulation.
 
 `VITE_*` values are browser-visible. Never place `LOCUS_BEARER_TOKEN`, a bearer
-token, or any other credential in a Vite variable. Browser authentication uses
-the externally provisioned HttpOnly `locus_auth` cookie (or the configured
-`LOCUS_AUTH_COOKIE_NAME`) at the proxy/identity boundary.
+token, or any other credential in a Vite variable. The public runtime issues
+its HttpOnly `locus_auth` cookie (or configured `LOCUS_AUTH_COOKIE_NAME`) after
+an exact-origin anonymous admission request.
 
 ## Worker compatibility deployment
 

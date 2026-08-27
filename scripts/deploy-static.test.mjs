@@ -24,6 +24,7 @@ function authority() {
     environment: {
       VITE_TEST_EVIDENCE_ROOT: `/test-evidence/${"a".repeat(40)}`,
       TEST_EVIDENCE_ACCEPTANCE_FILE: "/fixture/accepted.json",
+      VITE_LIVEHOST_WS_URL: "wss://runtime.example",
     },
   };
 }

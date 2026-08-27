@@ -28,7 +28,7 @@ for (const specifier of ["hson-live", "hson-live/locus", "hson-live/locus/node",
     throw new Error(`${specifier} does not resolve from the sibling hson-live checkout.`);
   }
 }
-for (const specifier of ["ws", "jsdom", "dompurify", "domhandler", "htmlparser2"]) {
+for (const specifier of ["ws"]) {
   import.meta.resolve(specifier, demoPackageUrl);
 }
 

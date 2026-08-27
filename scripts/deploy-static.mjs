@@ -32,8 +32,12 @@ function project_names(projects) {
 export function execute_static_deploy(options = {}) {
   const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
   const run = options.run ?? run_command;
-  const authority = (options.resolveVerification ?? resolve_static_artifact_verification)({ deploymentRoot });
-  const environment = { ...(options.environment ?? process.env), ...authority.environment };
+  const suppliedEnvironment = options.environment ?? process.env;
+  const authority = (options.resolveVerification ?? resolve_static_artifact_verification)({
+    deploymentRoot,
+    environment: suppliedEnvironment,
+  });
+  const environment = { ...suppliedEnvironment, ...authority.environment };
 
   run("npm", ["run", "verify:static-production-artifact"], { cwd: deploymentRoot, env: environment });
 

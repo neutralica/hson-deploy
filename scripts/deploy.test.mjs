@@ -26,8 +26,17 @@ function valid(freshness = "current") {
 
 test("ordinary deploy reuses a valid current artifact without source sync or certification", () => {
   const calls = [];
-  const result = execute_deploy({ deploymentRoot: "/fixture/hson-deploy", run: runner(calls), inspectReuse: () => valid(), environment: {}, log() {} });
+  const inspections = [];
+  const environment = { VITE_LIVEHOST_WS_URL: "wss://runtime.example" };
+  const result = execute_deploy({
+    deploymentRoot: "/fixture/hson-deploy",
+    run: runner(calls),
+    inspectReuse: (options) => { inspections.push(options); return valid(); },
+    environment,
+    log() {},
+  });
   assert.equal(result.reused, true);
+  assert.equal(inspections[0].environment, environment);
   assert.deepEqual(calls.map(({ invocation }) => invocation), ["npm run deploy:static"]);
 });
 
