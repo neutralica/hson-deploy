@@ -89,13 +89,19 @@ HTTP and does not initiate a hosted-test WebSocket or visitor-triggered
 execution. Complete semantic, browser, and certification
 reports—and `provenance.json`—remain in the accepted build/archive materialization.
 
-`VITE_LIVEHOST_WS_URL` is the browser-visible WebSocket origin of the deployed
-Node/LiveHost service. It must not contain an application path. TOWL derives
+`VITE_LIVEHOST_WS_URL` is the browser-visible generic runtime origin. It must
+not contain an application path. TOWL derives
 `/towl`; circuit verification derives `/circuit-verification`; both first use
 the runtime's anonymous `GET /session` admission endpoint. The frozen public
 Tests panel never opens a runtime route at visitor runtime. Public production requires `wss://`; explicit
 localhost, `127.0.0.1`, and `[::1]` `ws://` values are reserved for local
 production simulation.
+
+For the TOWL compatibility lane, set this same variable to the existing
+Worker's `wss://` origin. That Worker implements no-cookie `/session` bootstrap
+and `/towl` only. It deliberately returns 404 for `/hosted-tests` and
+`/circuit-verification`; therefore this lane restores TOWL without restoring
+hosted Tests or claiming Circuit support.
 
 `VITE_*` values are browser-visible. Never place `LOCUS_BEARER_TOKEN`, a bearer
 token, or any other credential in a Vite variable. The public runtime issues
@@ -107,6 +113,12 @@ an exact-origin anonymous admission request.
 `npm run deploy:worker` deploys only the Cloudflare Worker and Durable Object
 adapter in `hson-demo2`. It does not publish a static Vite build, deploy the
 persistent Node LiveHost service, commit a release, or push Git state.
+
+Restoring public TOWL therefore has two explicit publications: deploy the
+existing Worker with `npm run deploy:worker`, then prepare and deploy the static
+artifact with that Worker's origin supplied as `VITE_LIVEHOST_WS_URL`. Neither
+command creates a Worker project, Durable Object class, Pages project, or paid
+service; Wrangler targets the names already encoded in repository config.
 
 Before the Worker command can contact Cloudflare, it runs this local sequence:
 
