@@ -61,6 +61,30 @@ function assertClean(repoPath, label, context = "") {
 	}
 }
 
+function pathsFromGit(args) {
+	return git(deployRoot, [...args, "-z"], true).split("\0").filter(Boolean);
+}
+
+function assertParentStateReadable() {
+	const unmerged = pathsFromGit(["diff", "--name-only", "--diff-filter=U"]);
+	if (unmerged.length) {
+		fail("Cannot safely interpret hson-deploy while it contains unresolved conflicts.\nConflicted paths:\n" +
+			unmerged.map((file) => `  ${file}`).join("\n"));
+	}
+	const metadataChanges = new Set([
+		...pathsFromGit(["diff", "--name-only", "--", ".gitmodules"]),
+		...pathsFromGit(["diff", "--cached", "--name-only", "--", ".gitmodules"]),
+	]);
+	if (metadataChanges.size) {
+		fail("Cannot synchronize deployment submodules while .gitmodules has local changes.\nChanged paths:\n  .gitmodules");
+	}
+	const stagedGitlinks = pathsFromGit(["diff", "--cached", "--name-only", "--", ...targets.map(({ name }) => name)]);
+	if (stagedGitlinks.length) {
+		fail("Cannot synchronize deployment submodules because managed gitlinks already have staged changes.\nChanged paths:\n" +
+			stagedGitlinks.map((file) => `  ${file}`).join("\n"));
+	}
+}
+
 function assertMainUpstream(repoPath, label) {
 	const branch = git(repoPath, ["branch", "--show-current"], true);
 	if (branch !== "main") fail(`${label} must be on main; currently on ${branch || "(detached HEAD)"}.`);
@@ -104,19 +128,6 @@ function gitlink(revision, name) {
 	return match[1];
 }
 
-function assertParentWorktreeReconcilable() {
-	const currentStatus = status(deployRoot);
-	if (!currentStatus) return;
-	const names = new Set(targets.map(({ name }) => name));
-	const unrelated = currentStatus.split("\n").filter(Boolean).filter((line) => {
-		return line[0] !== " " || !names.has(statusPath(line));
-	});
-	if (unrelated.length) {
-		fail("hson-deploy contains unrelated or pre-staged changes.\nChanged paths:\n" +
-			unrelated.map((line) => `  ${statusPath(line)}`).join("\n"));
-	}
-}
-
 function synchronizeParent() {
 	assertMainUpstream(deployRoot, "hson-deploy");
 	fetchMain(deployRoot);
@@ -150,7 +161,21 @@ function validateTarget(target) {
 		state,
 		deploymentHead: git(target.deploymentPath, ["rev-parse", "HEAD"], true),
 		recordedGitlink: gitlink("HEAD", target.name),
+		desiredCommit: state.behind > 0
+			? git(target.canonicalPath, ["rev-parse", "origin/main"], true)
+			: git(target.canonicalPath, ["rev-parse", "HEAD"], true),
 	};
+}
+
+function assertParentGitlinksReconcilable(plans) {
+	for (const plan of plans) {
+		if (plan.deploymentHead !== plan.recordedGitlink && plan.deploymentHead !== plan.desiredCommit) {
+			fail(`Cannot update ${plan.name} deployment submodule: parent gitlink already has an unknown local change.\n` +
+				`Recorded gitlink: ${plan.recordedGitlink}\n` +
+				`Submodule HEAD:   ${plan.deploymentHead}\n` +
+				`Canonical HEAD:   ${plan.desiredCommit}`);
+		}
+	}
 }
 
 function makeCanonicalAvailable(plan) {
@@ -173,7 +198,8 @@ function makeCanonicalAvailable(plan) {
 function reconcile(plan, canonicalCommit) {
 	fetchMain(plan.deploymentPath);
 	git(plan.deploymentPath, ["cat-file", "-e", `${canonicalCommit}^{commit}`]);
-	if (plan.deploymentHead !== canonicalCommit) {
+	const checkoutChanged = plan.deploymentHead !== canonicalCommit;
+	if (checkoutChanged) {
 		console.log(`${plan.name}: ${plan.deploymentHead.slice(0, 7)} → ${canonicalCommit.slice(0, 7)}`);
 		git(plan.deploymentPath, ["switch", "--detach", canonicalCommit]);
 	}
@@ -183,7 +209,7 @@ function reconcile(plan, canonicalCommit) {
 	if (actual !== canonicalCommit) {
 		fail(`${plan.name} did not reach canonical HEAD.\nCanonical:  ${canonicalCommit}\nDeployment: ${actual}`);
 	}
-	return plan.recordedGitlink !== canonicalCommit;
+	return { checkoutChanged, gitlinkChanged: plan.recordedGitlink !== canonicalCommit };
 }
 
 function commitGitlinks(updates) {
@@ -221,21 +247,31 @@ function pushParent() {
 function main() {
 	if (process.argv.length > 2) fail("Usage:\n  npm run subs:update");
 	assertRepository(deployRoot, "hson-deploy");
-	assertParentWorktreeReconcilable();
+	const parentWasDirty = Boolean(status(deployRoot));
+	assertParentStateReadable();
 	synchronizeParent();
-	assertParentWorktreeReconcilable();
+	assertParentStateReadable();
 
 	// Validate every repository and authority relationship before mutating any checkout.
 	const plans = targets.map(validateTarget);
+	assertParentGitlinksReconcilable(plans);
 	const canonical = new Map(plans.map((plan) => [plan.name, makeCanonicalAvailable(plan)]));
 	const updates = [];
 	for (const plan of plans) {
 		const commit = canonical.get(plan.name);
-		if (reconcile(plan, commit)) updates.push({ name: plan.name, commit });
+		const result = reconcile(plan, commit);
+		if (result.gitlinkChanged) updates.push({ name: plan.name, commit, checkoutChanged: result.checkoutChanged });
 	}
 	if (!updates.length) {
-		assertClean(deployRoot, "hson-deploy");
 		console.log("All managed deployment submodules already match canonical HEADs; no updates required.");
+		return;
+	}
+	if (parentWasDirty) {
+		const synchronized = updates.some(({ checkoutChanged }) => checkoutChanged);
+		console.log(synchronized
+			? "Deployment parent contains unrelated changes; submodules were synchronized but bookkeeping commit was skipped."
+			: "Deployment submodules already match canonical HEADs; existing gitlink updates remain uncommitted because the parent contains other changes.");
+		console.log(`Uncommitted gitlink updates: ${updates.map(({ name, commit }) => `${name} (${commit.slice(0, 7)})`).join(", ")}.`);
 		return;
 	}
 	commitGitlinks(updates);

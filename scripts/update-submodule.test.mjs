@@ -87,6 +87,22 @@ function assertPins(f, updates) {
 	for (const [name, commit] of updates) assert.ok(message.includes(`${name}: ${commit.slice(0, 7)}`));
 }
 
+function assertUncommittedPins(f, updates, parentHead) {
+	assert.equal(git(f.deploy, "rev-parse", "HEAD"), parentHead);
+	assert.equal(git(f.parentRemote, "rev-parse", "main"), parentHead);
+	for (const [name, commit] of updates) {
+		assert.equal(git(path.join(f.deploy, name), "rev-parse", "HEAD"), commit);
+		assert.notEqual(git(f.deploy, "ls-tree", "HEAD", "--", name).split(/\s+/)[2], commit);
+	}
+}
+
+function addTrackedParentFile(f) {
+	writeFileSync(path.join(f.deploy, "DEPLOYMENT.md"), "initial\n");
+	git(f.deploy, "add", "DEPLOYMENT.md");
+	git(f.deploy, "commit", "-m", "Add deployment notes");
+	git(f.deploy, "push", "origin", "main");
+}
+
 test("already synchronized is a no-op with no empty commit", () => {
 	const f = fixture();
 	try {
@@ -125,25 +141,129 @@ test("dirty canonical source reports the changed path", () => {
 test("dirty deployment reports path and canonical sibling", () => {
 	const f = fixture();
 	try {
+		const beforeDemo = git(path.join(f.deploy, "hson-demo2"), "rev-parse", "HEAD");
+		const beforeLive = git(path.join(f.deploy, "hson-live"), "rev-parse", "HEAD");
+		sourceCommit(f, "hson-demo2");
+		sourceCommit(f, "hson-live");
 		appendFileSync(path.join(f.deploy, "hson-live", "source.txt"), "residue\n");
+		const dirtyBefore = git(path.join(f.deploy, "hson-live"), "diff", "--", "source.txt");
 		const result = run(f);
 		assert.notEqual(result.status, 0);
 		assert.match(out(result), /deployment submodule hson-live must be clean/);
 		assert.match(out(result), /source\.txt/);
 		assert.ok(out(result).includes(f.canonical["hson-live"]));
+		assert.equal(git(path.join(f.deploy, "hson-demo2"), "rev-parse", "HEAD"), beforeDemo);
+		assert.equal(git(path.join(f.deploy, "hson-live"), "rev-parse", "HEAD"), beforeLive);
+		assert.equal(git(path.join(f.deploy, "hson-live"), "diff", "--", "source.txt"), dirtyBefore);
 	} finally { f.cleanup(); }
 });
 
-test("unrelated parent work fails without a commit", () => {
+test("unrelated modified parent work allows synchronization and skips bookkeeping", () => {
+	const f = fixture();
+	try {
+		addTrackedParentFile(f);
+		const before = git(f.deploy, "rev-parse", "HEAD");
+		const commit = sourceCommit(f, "hson-live");
+		appendFileSync(path.join(f.deploy, "DEPLOYMENT.md"), "unrelated\n");
+		const dirtyBefore = git(f.deploy, "diff", "--", "DEPLOYMENT.md");
+		const result = run(f);
+		assert.equal(result.status, 0, out(result));
+		assert.match(out(result), /bookkeeping commit was skipped/);
+		assertUncommittedPins(f, [["hson-live", commit]], before);
+		assert.equal(git(f.deploy, "diff", "--", "DEPLOYMENT.md"), dirtyBefore);
+	} finally { f.cleanup(); }
+});
+
+test("unrelated untracked parent work is untouched while synchronization succeeds", () => {
 	const f = fixture();
 	try {
 		const before = git(f.deploy, "rev-parse", "HEAD");
+		const commit = sourceCommit(f, "hson-live");
 		writeFileSync(path.join(f.deploy, "notes.txt"), "unrelated\n");
 		const result = run(f);
+		assert.equal(result.status, 0, out(result));
+		assert.match(out(result), /bookkeeping commit was skipped/);
+		assertUncommittedPins(f, [["hson-live", commit]], before);
+		assert.equal(git(f.deploy, "status", "--short", "--", "notes.txt"), "?? notes.txt");
+	} finally { f.cleanup(); }
+});
+
+test("unrelated staged parent work remains staged and is not committed", () => {
+	const f = fixture();
+	try {
+		addTrackedParentFile(f);
+		const before = git(f.deploy, "rev-parse", "HEAD");
+		const commit = sourceCommit(f, "hson-live");
+		appendFileSync(path.join(f.deploy, "DEPLOYMENT.md"), "staged user work\n");
+		git(f.deploy, "add", "DEPLOYMENT.md");
+		const stagedBefore = git(f.deploy, "diff", "--cached", "--", "DEPLOYMENT.md");
+		const result = run(f);
+		assert.equal(result.status, 0, out(result));
+		assert.match(out(result), /bookkeeping commit was skipped/);
+		assertUncommittedPins(f, [["hson-live", commit]], before);
+		assert.equal(git(f.deploy, "diff", "--cached", "--", "DEPLOYMENT.md"), stagedBefore);
+		assert.equal(git(f.deploy, "diff", "--cached", "--name-only"), "DEPLOYMENT.md");
+	} finally { f.cleanup(); }
+});
+
+test("unknown relevant gitlink change blocks before reconciliation", () => {
+	const f = fixture();
+	try {
+		const intermediate = sourceCommit(f, "hson-live");
+		const desired = sourceCommit(f, "hson-live");
+		git(path.join(f.deploy, "hson-live"), "fetch", "origin", "main");
+		git(path.join(f.deploy, "hson-live"), "switch", "--detach", intermediate);
+		const result = run(f);
 		assert.notEqual(result.status, 0);
-		assert.match(out(result), /unrelated or pre-staged changes/);
-		assert.match(out(result), /notes\.txt/);
-		assert.equal(git(f.deploy, "rev-parse", "HEAD"), before);
+		assert.match(out(result), /parent gitlink already has an unknown local change/);
+		assert.match(out(result), new RegExp(intermediate));
+		assert.match(out(result), new RegExp(desired));
+		assert.equal(git(path.join(f.deploy, "hson-live"), "rev-parse", "HEAD"), intermediate);
+	} finally { f.cleanup(); }
+});
+
+test("staged managed gitlink blocks without disturbing the index", () => {
+	const f = fixture();
+	try {
+		const commit = sourceCommit(f, "hson-live");
+		git(path.join(f.deploy, "hson-live"), "fetch", "origin", "main");
+		git(path.join(f.deploy, "hson-live"), "switch", "--detach", commit);
+		git(f.deploy, "add", "--", "hson-live");
+		const stagedBefore = git(f.deploy, "diff", "--cached", "--", "hson-live");
+		const result = run(f);
+		assert.notEqual(result.status, 0);
+		assert.match(out(result), /managed gitlinks already have staged changes/);
+		assert.match(out(result), /hson-live/);
+		assert.equal(git(f.deploy, "diff", "--cached", "--", "hson-live"), stagedBefore);
+	} finally { f.cleanup(); }
+});
+
+test("local .gitmodules changes block as relevant synchronization metadata", () => {
+	const f = fixture();
+	try {
+		appendFileSync(path.join(f.deploy, ".gitmodules"), "# local change\n");
+		const dirtyBefore = git(f.deploy, "diff", "--", ".gitmodules");
+		const result = run(f);
+		assert.notEqual(result.status, 0);
+		assert.match(out(result), /\.gitmodules has local changes/);
+		assert.equal(git(f.deploy, "diff", "--", ".gitmodules"), dirtyBefore);
+	} finally { f.cleanup(); }
+});
+
+test("dirty-parent synchronization is idempotent with an uncommitted desired gitlink", () => {
+	const f = fixture();
+	try {
+		const commit = sourceCommit(f, "hson-live");
+		writeFileSync(path.join(f.deploy, "notes.txt"), "unrelated\n");
+		const first = run(f);
+		assert.equal(first.status, 0, out(first));
+		const statusAfterFirst = git(f.deploy, "status", "--porcelain=v1", "--untracked-files=all");
+		const second = run(f);
+		assert.equal(second.status, 0, out(second));
+		assert.match(out(second), /already match canonical HEADs/);
+		assert.match(out(second), /gitlink updates remain uncommitted/);
+		assert.equal(git(f.deploy, "status", "--porcelain=v1", "--untracked-files=all"), statusAfterFirst);
+		assert.equal(git(path.join(f.deploy, "hson-live"), "rev-parse", "HEAD"), commit);
 	} finally { f.cleanup(); }
 });
 
