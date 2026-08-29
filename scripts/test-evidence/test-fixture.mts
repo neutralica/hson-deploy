@@ -14,7 +14,7 @@ function evidence(id: string, content: string) {
 
 function suite(id: string, shape: string, cases: any[], retained: any[] = [], suiteRefs = retained.map((entry) => entry.id)) {
   return {
-    id, title: id, subject: "HSON", collections: [], provenance: { source: "fixture" }, order: 0,
+    id, title: id, subject: "Hson", collections: [], provenance: { source: "fixture" }, order: 0,
     executionShape: shape, plannedExecutorId: "fixture", sourceRef: shape === "certification-aggregate" ? `node-command:${id}` : null,
     declaredChecks: null, status: "pass", ...lifecycle(),
     counts: shape === "opaque-aggregate"
