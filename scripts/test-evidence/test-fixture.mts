@@ -69,11 +69,15 @@ export async function make_capture(root: string, options: { longCaseId?: boolean
       browser: { idCount: 1, ids: reports.browser.plan.selectionIds },
       certification: { idCount: certificationSuites.length, ids: reports.certification.plan.selectionIds },
     },
-    runs: Object.fromEntries(Object.entries(reports).map(([name, value]) => [name, {
-      runId: value.run.id, attemptId: `${value.run.id}:attempt:1`, reportHostId: `host:${name}`, reportRev: 1, clientAppliedReportRev: 1,
-      reportFile: `${name}.json`, selectionCount: value.plan.selectionIds.length,
-      ...(name === "browser" ? { journeyCount: 1 } : {}), terminalStatus: "passed", rawBytes: raw[name].byteLength,
-    }])),
+    runs: Object.fromEntries(Object.entries(reports).map(([name, value]) => {
+      const reportBytes = raw[name];
+      if (reportBytes === undefined) throw new Error(`TEST_FIXTURE_REPORT_BYTES_MISSING:${name}`);
+      return [name, {
+        runId: value.run.id, attemptId: `${value.run.id}:attempt:1`, reportHostId: `host:${name}`, reportRev: 1, clientAppliedReportRev: 1,
+        reportFile: `${name}.json`, selectionCount: value.plan.selectionIds.length,
+        ...(name === "browser" ? { journeyCount: 1 } : {}), terminalStatus: "passed", rawBytes: reportBytes.byteLength,
+      }];
+    })),
   };
   const cleanup = {
     clientSockets: { total: 0, hostedTests: { total: 0 }, towl: 0, circuitVerification: 0 },

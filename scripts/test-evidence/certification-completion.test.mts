@@ -58,7 +58,7 @@ function successful_process_result(): NodeProcessResult {
   return Object.freeze({
     stdout: "", stderr: "", stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false,
     exitCode: 0, signal: null, durationMs: 1, timedOut: false, cancelled: false, outputLimitExceeded: false,
-    forceKilled: false, spawnError: undefined, ok: true,
+    forceKilled: false, ok: true,
   });
 }
 

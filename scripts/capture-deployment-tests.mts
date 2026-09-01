@@ -1,3 +1,5 @@
+/// <reference path="../hson-demo2/tests/harness/runtimes/dom/jsdom.types.d.ts" />
+
 import assert from "node:assert/strict";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
@@ -129,7 +131,13 @@ async function state(supervisor: NodeProcessSupervisor): Promise<DeploymentState
     if (expected !== actual || await git(supervisor, ["status", "--porcelain"], join(ROOT, path)) !== "") throw new Error(`DEPLOYMENT_CAPTURE_SUBMODULE_INVALID:${path}`);
     links[path] = actual;
   }
-  return Object.freeze({ hsonDeployCommit: await git(supervisor, ["rev-parse", "HEAD"]), hsonDemo2Gitlink: links["hson-demo2"], hsonLiveGitlink: links["hson-live"], intrastructureGitlink: links.intrastructure });
+  const hsonDemo2Gitlink = links["hson-demo2"];
+  const hsonLiveGitlink = links["hson-live"];
+  const intrastructureGitlink = links.intrastructure;
+  if (hsonDemo2Gitlink === undefined || hsonLiveGitlink === undefined || intrastructureGitlink === undefined) {
+    throw new Error("DEPLOYMENT_CAPTURE_SUBMODULE_STATE_INCOMPLETE");
+  }
+  return Object.freeze({ hsonDeployCommit: await git(supervisor, ["rev-parse", "HEAD"]), hsonDemo2Gitlink, hsonLiveGitlink, intrastructureGitlink });
 }
 function unique<T extends string>(ids: readonly T[], name: string) { if (new Set(ids).size !== ids.length) throw new Error(`DEPLOYMENT_CAPTURE_DUPLICATE:${name}`); return Object.freeze([...ids]); }
 export function derive_selections(discovery: TestExecutorDiscovery): readonly Selection[] {

@@ -196,6 +196,7 @@ export async function validate_capture(candidate: string, options: { repositoryR
     catch { throw new Error(`TEST_EVIDENCE_CAPTURE_JSON_INVALID:${file}`); }
   }
   const metadata = parsed["capture-metadata.json"];
+  assert.ok(metadata, "TEST_EVIDENCE_CAPTURE_METADATA_MISSING");
   const normal = JSON.stringify(metadata.selectedStages) === JSON.stringify(NORMAL_CATEGORIES);
   const legacyCertified = JSON.stringify(metadata.selectedStages) === JSON.stringify(CATEGORIES);
   assert.equal(normal || legacyCertified, true, "TEST_EVIDENCE_CAPTURE_NOT_NORMAL_OR_LEGACY_COMBINED");
@@ -208,7 +209,9 @@ export async function validate_capture(candidate: string, options: { repositoryR
     try { parsed[file] = JSON.parse(raw.toString("utf8")); }
     catch { throw new Error(`TEST_EVIDENCE_CAPTURE_JSON_INVALID:${file}`); }
   }
-  validate_cleanup(parsed["capture-cleanup.json"]);
+  const cleanup = parsed["capture-cleanup.json"];
+  assert.ok(cleanup, "TEST_EVIDENCE_CAPTURE_CLEANUP_MISSING");
+  validate_cleanup(cleanup);
   const reports = Object.fromEntries(categories.map((category) => [category, parsed[`${category}.json`]])) as Partial<Record<Category, JsonObject>>;
   const reportBytes = Object.fromEntries(categories.map((category) => [category, bytes[`${category}.json`]])) as Partial<Record<Category, Buffer>>;
   for (const category of categories) validate_report(category, reports[category]!, metadata, reportBytes[category]!.byteLength);
@@ -218,7 +221,7 @@ export async function validate_capture(candidate: string, options: { repositoryR
   assert_unique(allSuites, "GLOBAL_SUITE_ID");
   assert_unique(allCases, "GLOBAL_CASE_ID");
   if (options.verifyRevisions !== false) verify_revisions(resolve(options.repositoryRoot ?? join(import.meta.dirname, "../..")), metadata.deployment);
-  return Object.freeze({ candidate: resolve(candidate), capture, metadata, categories, cleanup: parsed["capture-cleanup.json"], reports, reportBytes, accounting });
+  return Object.freeze({ candidate: resolve(candidate), capture, metadata, categories, cleanup, reports, reportBytes, accounting });
 }
 
 function artifact_tuple_digest(records: readonly ArtifactRecord[]): string {
@@ -250,7 +253,10 @@ export type MaterializationResult = Readonly<{
 
 export async function materialize_test_evidence(captureCandidate: string, options: { repositoryRoot?: string; workRoot?: string; materializedAt?: string; verifyRevisions?: boolean } = {}): Promise<MaterializationResult> {
   const repositoryRoot = resolve(options.repositoryRoot ?? join(import.meta.dirname, "../.."));
-  const source = await validate_capture(captureCandidate, { repositoryRoot, verifyRevisions: options.verifyRevisions });
+  const validationOptions = options.verifyRevisions === undefined
+    ? { repositoryRoot }
+    : { repositoryRoot, verifyRevisions: options.verifyRevisions };
+  const source = await validate_capture(captureCandidate, validationOptions);
   const candidate = join(resolve(options.workRoot ?? join(repositoryRoot, ".deployment-work")), `materialize-${Date.now().toString(36)}-${randomUUID()}`);
   const siteRoot = join(candidate, "site");
   const publicRoot = `test-evidence/${source.metadata.deployment.hsonDeployCommit}`;
