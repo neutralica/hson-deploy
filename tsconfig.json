@@ -3,6 +3,9 @@
     "noEmit": true,
     "skipLibCheck": true
   },
+  "include": [
+    "scripts/**/*.mts"
+  ],
   "exclude": [
     "**/node_modules/**",
     "**/dist/**",
