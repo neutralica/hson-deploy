@@ -26,6 +26,7 @@ function authority() {
       TEST_EVIDENCE_ACCEPTANCE_FILE: "/fixture/accepted.json",
       VITE_LIVEHOST_WS_URL: "wss://runtime.example",
     },
+    publication: { suitable: true },
   };
 }
 
@@ -60,6 +61,24 @@ test("artifact verification failure prevents every provider invocation", () => {
   };
   assert.throws(() => execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", run, resolveVerification: authority, environment: {} }), /artifact invalid/);
   assert.deepEqual(calls.map(({ command, arguments_ }) => `${command} ${arguments_.join(" ")}`), ["npm run verify:static-production-artifact"]);
+});
+
+test("publication-suitability failure prevents verification and every provider invocation", () => {
+  const calls = [];
+  const localAuthority = () => ({
+    ...authority(),
+    publication: {
+      suitable: false,
+      reason: "Certified artifact is valid but uses local runtime origin ws://127.0.0.1:8787; public deployment requires an explicit public wss:// runtime origin.",
+    },
+  });
+  assert.throws(() => execute_static_deploy({
+    deploymentRoot: "/fixture/hson-deploy",
+    run: successful_runner(calls),
+    resolveVerification: localAuthority,
+    environment: {},
+  }), /valid but uses local runtime origin ws:\/\/127\.0\.0\.1:8787/);
+  assert.deepEqual(calls, []);
 });
 
 test("provider target guard refuses deployment when the expected Pages project is absent", () => {

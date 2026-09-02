@@ -12,7 +12,7 @@ const evidenceRoot = `test-evidence/${commit}`;
 const environment = { VITE_LIVEHOST_WS_URL: "wss://runtime.example" };
 const categories = ["transform", "livetree", "livemap", "locus", "livehost", "reflect", "unit", "browser", "certification"];
 
-async function fixture(receiptOverrides = {}) {
+async function fixture(receiptOverrides = {}, liveHost = "wss://runtime.example") {
   const deploymentRoot = await mkdtemp(join(tmpdir(), "hson-deploy-authority-"));
   const artifact = join(deploymentRoot, "static-production");
   const materialization = join(deploymentRoot, ".deployment-work", "materialize-fixture");
@@ -34,7 +34,7 @@ async function fixture(receiptOverrides = {}) {
   await writeFile(join(publicEvidence, "index.json"), index);
   await writeFile(join(acceptedEvidence, "index.json"), index);
   await writeFile(join(artifact, "index.html"), `<script>const root="/${evidenceRoot}"</script>`);
-  await writeFile(join(artifact, "assets", "frozen.js"), "const marker='data-frozen-panel-state frozen-test-panel';const livehost='wss://runtime.example';const routes='/towl /circuit-verification';");
+  await writeFile(join(artifact, "assets", "frozen.js"), `const env={VITE_LIVEHOST_WS_URL:${JSON.stringify(liveHost)}};const marker='data-frozen-panel-state frozen-test-panel';const routes='/towl /circuit-verification';`);
   await writeFile(join(artifact, "certification-receipt.json"), JSON.stringify({
     schemaVersion: 1,
     kind: "hson-tests-explorer-certification",
@@ -48,12 +48,22 @@ async function fixture(receiptOverrides = {}) {
   return { deploymentRoot, artifact };
 }
 
-test("certified artifact validity includes the supplied LiveHost identity while freshness reports current source identity", async () => {
+test("certified artifact validity uses the embedded LiveHost identity while freshness reports current source identity", async () => {
   const valid = await fixture();
-  const reusable = inspect_reusable_certified_artifact({ ...valid, environment, currentCommit: () => commit });
+  const reusable = inspect_reusable_certified_artifact({ ...valid, environment: {}, currentCommit: () => commit });
   assert.equal(reusable.valid, true, reusable.reason);
   assert.equal(reusable.freshness, "current");
   assert.equal(reusable.authority.artifactSetSha256, artifactSet);
+  assert.equal(reusable.authority.liveHost.origin, "wss://runtime.example");
+  assert.equal(reusable.publication.suitable, true);
+
+  const unrelatedDeployInput = inspect_reusable_certified_artifact({
+    ...valid,
+    environment: { VITE_LIVEHOST_WS_URL: "wss://different.example" },
+    currentCommit: () => commit,
+  });
+  assert.equal(unrelatedDeployInput.valid, true, unrelatedDeployInput.reason);
+  assert.equal(unrelatedDeployInput.authority.liveHost.origin, "wss://runtime.example");
 
   const stale = inspect_reusable_certified_artifact({ ...valid, environment, currentCommit: () => "c".repeat(40) });
   assert.equal(stale.valid, true);
@@ -70,6 +80,17 @@ test("certified artifact validity includes the supplied LiveHost identity while 
   const rejectedHash = inspect_reusable_certified_artifact({ ...mismatched, environment, currentCommit: () => commit });
   assert.equal(rejectedHash.valid, false);
   assert.match(rejectedHash.reason, /certified evidence hash/);
+});
+
+test("a current loopback-certified artifact remains valid but is separately not publication-suitable", async () => {
+  const valid = await fixture({}, "ws://127.0.0.1:8787");
+  const reusable = inspect_reusable_certified_artifact({ ...valid, environment: {}, currentCommit: () => commit });
+  assert.equal(reusable.valid, true, reusable.reason);
+  assert.equal(reusable.freshness, "current");
+  assert.equal(reusable.authority.artifactSetSha256, artifactSet);
+  assert.equal(reusable.authority.evidenceRoot, `/test-evidence/${commit}`);
+  assert.equal(reusable.publication.suitable, false);
+  assert.match(reusable.publication.reason, /valid but uses local runtime origin ws:\/\/127\.0\.0\.1:8787/);
 });
 
 test("corrupted static bytes remain invalid regardless of source freshness", async () => {

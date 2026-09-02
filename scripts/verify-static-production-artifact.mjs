@@ -12,6 +12,29 @@ function files(directory) {
   });
 }
 
+function artifact_sources(artifact) {
+  return files(artifact)
+    .filter((path) => /\.(?:html|js|css)$/.test(path))
+    .map((path) => readFileSync(path, "utf8"));
+}
+
+export function resolve_embedded_livehost_browser_configuration(options = {}) {
+  const root = resolve(import.meta.dirname, "..");
+  const artifact = resolve(options.artifact ?? resolve(root, "static-production"));
+  const values = new Set();
+  const pattern = /(?:["']VITE_LIVEHOST_WS_URL["']|\bVITE_LIVEHOST_WS_URL)\s*:\s*(["'])([^"'\\]+)\1/g;
+  for (const source of artifact_sources(artifact)) {
+    for (const match of source.matchAll(pattern)) values.add(match[2]);
+  }
+  if (values.size === 0) {
+    throw new Error("Static production artifact does not identify its embedded VITE_LIVEHOST_WS_URL.");
+  }
+  if (values.size !== 1) {
+    throw new Error(`Static production artifact contains ambiguous embedded VITE_LIVEHOST_WS_URL values: ${[...values].sort().join(", ")}.`);
+  }
+  return validate_livehost_browser_configuration({ VITE_LIVEHOST_WS_URL: [...values][0] });
+}
+
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
 
 function public_json(publicRoot, reference, kind) {
@@ -61,7 +84,7 @@ export function verify_static_production_artifact(options = {}) {
   if (!existsSync(resolve(publicRoot, "index.json"))) throw new Error("Static production artifact is missing its public frozen index.");
   if (existsSync(resolve(publicRoot, "reports")) || existsSync(resolve(publicRoot, "provenance.json"))) throw new Error("Static production artifact exposes archive-only frozen evidence.");
 
-  const sources = files(artifact).filter((path) => /\.(?:html|js|css)$/.test(path)).map((path) => readFileSync(path, "utf8"));
+  const sources = artifact_sources(artifact);
   if (!sources.some((source) => source.includes(evidence.root))) throw new Error("Static production artifact does not contain the exact accepted VITE_TEST_EVIDENCE_ROOT.");
   const embeddedRoots = [...sources.join("\n").matchAll(/\/test-evidence\/([0-9a-f]{40})/g)].map((match) => match[1]);
   if (embeddedRoots.some((commit) => commit !== evidence.deploymentCommit)) throw new Error("Static production artifact contains a stale test-evidence root.");

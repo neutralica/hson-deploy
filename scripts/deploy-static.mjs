@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolve_static_artifact_verification } from "./static-deployment-authority.mjs";
+import { assert_publication_suitable, resolve_static_artifact_verification } from "./static-deployment-authority.mjs";
 
 export const PAGES_PROJECT = "hson-deploy";
 export const PAGES_BRANCH = "main";
@@ -37,6 +37,7 @@ export function execute_static_deploy(options = {}) {
     deploymentRoot,
     environment: suppliedEnvironment,
   });
+  assert_publication_suitable(authority);
   const environment = { ...suppliedEnvironment, ...authority.environment };
 
   run("npm", ["run", "verify:static-production-artifact"], { cwd: deploymentRoot, env: environment });

@@ -23,13 +23,14 @@ function runner(calls, failAt) {
   };
 }
 
-function valid(freshness = "current") {
+function valid(freshness = "current", publication = { suitable: true }) {
   return {
     valid: true,
     freshness,
     certifiedDeploymentCommit: certified,
     currentDeploymentCommit: freshness === "current" ? certified : current,
     receipt: { deploymentCommit: certified },
+    publication,
   };
 }
 
@@ -49,14 +50,34 @@ test("ordinary deploy reuses a valid current artifact without source sync or cer
   assert.deepEqual(calls.map(({ invocation }) => invocation), ["npm run deploy:static"]);
 });
 
-test("ordinary deploy accepts a valid stale artifact and reports its freshness", () => {
+test("ordinary deploy does not reuse an artifact certified for a different deployment commit", () => {
   const calls = [];
-  const logs = [];
-  const result = execute_deploy({ deploymentRoot: "/fixture/hson-deploy", run: runner(calls), inspectReuse: () => valid("stale"), environment: {}, log: (line) => logs.push(line) });
-  assert.equal(result.reused, true);
-  assert.deepEqual(calls.map(({ invocation }) => invocation), ["npm run deploy:static"]);
-  assert.match(logs.join("\n"), /Freshness .* STALE/);
-  assert.match(logs.join("\n"), new RegExp(`Deploying certified artifact ${certified}`));
+  let inspections = 0;
+  const result = execute_deploy({
+    deploymentRoot: "/fixture/hson-deploy",
+    run: runner(calls),
+    inspectReuse: () => ++inspections === 1 ? valid("stale") : valid(),
+    environment: {},
+    log() {},
+  });
+  assert.equal(result.reused, false);
+  assert.deepEqual(calls.map(({ invocation }) => invocation), ["npm run certify", "npm run deploy:static"]);
+});
+
+test("ordinary deploy never certifies a valid current loopback artifact and fails before static deploy", () => {
+  const calls = [];
+  const publication = {
+    suitable: false,
+    reason: "Certified artifact is valid but uses local runtime origin ws://127.0.0.1:8787; public deployment requires an explicit public wss:// runtime origin.",
+  };
+  assert.throws(() => execute_deploy({
+    deploymentRoot: "/fixture/hson-deploy",
+    run: runner(calls),
+    inspectReuse: () => valid("current", publication),
+    environment: {},
+    log() {},
+  }), /valid but uses local runtime origin ws:\/\/127\.0\.0\.1:8787/);
+  assert.deepEqual(calls, []);
 });
 
 for (const reason of ["certification receipt missing or invalid", "artifact hash mismatch"]) {
@@ -95,13 +116,13 @@ test("successful fallback without a valid result prevents deployment", () => {
     inspectReuse: () => ({ valid: false, reason: "receipt or bytes invalid" }),
     environment: {},
     log() {},
-  }), /without a valid certified artifact/);
+  }), /without a valid current-source certified artifact/);
   assert.deepEqual(calls.map(({ invocation }) => invocation), ["npm run certify"]);
 });
 
 test("ordinary deploy invokes no source synchronization, verification, or Git command", () => {
   const calls = [];
-  execute_deploy({ deploymentRoot: "/fixture/hson-deploy", run: runner(calls), inspectReuse: () => valid("stale"), environment: {}, log() {} });
+  execute_deploy({ deploymentRoot: "/fixture/hson-deploy", run: runner(calls), inspectReuse: () => valid(), environment: {}, log() {} });
   const invocations = calls.map(({ invocation }) => invocation).join("\n");
   assert.doesNotMatch(invocations, /subs:update|npm run verify(?:\s|$)|\bgit\b|commit|push/);
   assert.match(invocations, /npm run deploy:static/);

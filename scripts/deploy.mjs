@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inspect_reusable_certified_artifact } from "./static-deployment-authority.mjs";
+import { assert_publication_suitable, inspect_reusable_certified_artifact } from "./static-deployment-authority.mjs";
 
 function run_command(command, arguments_, options = {}) {
   return execFileSync(command, arguments_, {
@@ -22,22 +22,27 @@ export function execute_deploy(options = {}) {
 
   const inspectReuse = options.inspectReuse ?? inspect_reusable_certified_artifact;
   let reuse = inspectReuse({ deploymentRoot, environment });
-  const reusedExisting = reuse.valid;
-  if (reuse.valid) {
+  const reusedExisting = reuse.valid && reuse.freshness === "current";
+  if (reusedExisting) {
     log(`Certified artifact ........ VALID`);
     log(`Certified deployment ...... ${reuse.certifiedDeploymentCommit}`);
     log(`Current deployment ........ ${reuse.currentDeploymentCommit}`);
     log(`Freshness .................. ${reuse.freshness.toUpperCase()}`);
-    log(`Deploying certified artifact ${reuse.certifiedDeploymentCommit}.`);
+    log(`Certified artifact reused for ${reuse.certifiedDeploymentCommit}.`);
   } else {
-    log(`No valid certified artifact is available (${reuse.reason}); certifying the currently pinned deployment revision.`);
+    const reason = reuse.valid
+      ? `available certification is ${reuse.freshness} (${reuse.certifiedDeploymentCommit})`
+      : reuse.reason;
+    log(`Certification required (${reason}); certifying the currently pinned deployment revision.`);
     run("npm", ["run", "certify"], { cwd: deploymentRoot, env: environment });
     reuse = inspectReuse({ deploymentRoot, environment });
-    if (!reuse.valid) {
-      throw new Error(`Certification completed without a valid certified artifact: ${reuse.reason}.`);
+    if (!reuse.valid || reuse.freshness !== "current") {
+      const result = reuse.valid ? `artifact freshness is ${reuse.freshness}` : reuse.reason;
+      throw new Error(`Certification completed without a valid current-source certified artifact: ${result}.`);
     }
   }
 
+  assert_publication_suitable(reuse);
   run("npm", ["run", "deploy:static"], { cwd: deploymentRoot, env: environment });
   return Object.freeze({ reused: reusedExisting });
 }
@@ -69,6 +74,7 @@ export function execute_deploy_latest(options = {}) {
     }
   }
 
+  assert_publication_suitable(reuse);
   run("npm", ["run", "deploy:static"], { cwd: deploymentRoot, env: environment });
   return Object.freeze({ reused: reusedExisting });
 }

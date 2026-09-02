@@ -1,11 +1,27 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { verify_static_production_artifact } from "./verify-static-production-artifact.mjs";
+import { resolve_embedded_livehost_browser_configuration, verify_static_production_artifact } from "./verify-static-production-artifact.mjs";
 
 const EVIDENCE_ROOT_PATTERN = /^test-evidence\/([0-9a-f]{40})$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 export const EXPECTED_CERTIFICATION_AUTHORITY = "npm run capture:deployment-tests:certification";
+
+export function classify_publication_suitability(liveHost) {
+  if (liveHost.localSimulation) {
+    return Object.freeze({
+      suitable: false,
+      reason: `Certified artifact is valid but uses local runtime origin ${liveHost.origin}; public deployment requires an explicit public wss:// runtime origin.`,
+    });
+  }
+  return Object.freeze({ suitable: true });
+}
+
+export function assert_publication_suitable(authority) {
+  if (authority.publication?.suitable !== true) {
+    throw new Error(authority.publication?.reason ?? "Certified artifact is valid but is not suitable for public deployment.");
+  }
+}
 
 function read_json(path) {
   try { return JSON.parse(readFileSync(path, "utf8")); }
@@ -40,7 +56,6 @@ export function accepted_evidence_candidates(deploymentRoot, evidenceRoot) {
 export function resolve_static_artifact_verification(options = {}) {
   const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
   const artifact = resolve(options.artifact ?? join(deploymentRoot, "static-production"));
-  const suppliedEnvironment = options.environment ?? process.env;
   const roots = artifact_evidence_roots(artifact);
   if (roots.length !== 1) {
     throw new Error(`Static production artifact must contain exactly one immutable test-evidence root; found ${roots.length}.`);
@@ -59,16 +74,18 @@ export function resolve_static_artifact_verification(options = {}) {
   }
   let lastError;
   for (const candidate of eligible) {
+    let liveHost;
+    try { liveHost = resolve_embedded_livehost_browser_configuration({ artifact }); }
+    catch (cause) { lastError = cause; break; }
     const environment = {
       VITE_TEST_EVIDENCE_ROOT: evidenceRoot,
       TEST_EVIDENCE_ACCEPTANCE_FILE: candidate.path,
-      ...(suppliedEnvironment.VITE_LIVEHOST_WS_URL === undefined
-        ? {}
-        : { VITE_LIVEHOST_WS_URL: suppliedEnvironment.VITE_LIVEHOST_WS_URL }),
+      VITE_LIVEHOST_WS_URL: liveHost.configured,
     };
     try {
       const verification = verify_static_production_artifact({ artifact, environment });
-      return Object.freeze({ deploymentRoot, artifact, evidenceRoot, acceptanceFile: candidate.path, artifactSetSha256: candidate.value.artifactSet, environment, verification });
+      const publication = classify_publication_suitability(liveHost);
+      return Object.freeze({ deploymentRoot, artifact, evidenceRoot, acceptanceFile: candidate.path, artifactSetSha256: candidate.value.artifactSet, environment, verification, liveHost, publication });
     } catch (cause) { lastError = cause; }
   }
   const detail = lastError instanceof Error ? ` ${lastError.message}` : "";
@@ -116,6 +133,7 @@ export function inspect_reusable_certified_artifact(options = {}) {
       receipt,
       receiptPath,
       authority,
+      publication: authority.publication,
     });
   } catch (cause) {
     return Object.freeze({ valid: false, reason: cause instanceof Error ? cause.message : String(cause) });
