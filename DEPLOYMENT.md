@@ -59,6 +59,12 @@ primitives for clean gitlink verification, capture, evidence materialization, st
 verification. `npm run pack` and `npm run certify` are convenience entrypoints into the single hson-demo2
 implementation; they do not contain a second pipeline.
 
+For ordinary local use, both commands require no runtime-origin environment prefix. They use
+`ws://127.0.0.1:8787` as the established local production-simulation origin when
+`VITE_LIVEHOST_WS_URL` is absent or empty; an explicitly supplied value overrides that default and is
+validated before capture begins. Public deployment retains its separate runtime-origin requirements and
+is not configured by this local packaging default.
+
 `pack` requires a clean superproject, clean pinned submodules, and (when invoked through a sibling consumer
 checkout) the exact same clean hson-demo2 and hson-live revisions as those gitlinks. It rebuilds
 `hson-live/dist` before capture, captures only the normal semantic and browser evidence, and then uses the

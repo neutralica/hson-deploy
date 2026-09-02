@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import { execute_deploy, execute_deploy_latest } from "./deploy.mjs";
 
 const certified = "a".repeat(40);
 const current = "b".repeat(40);
+
+test("public deploy logic has no unconditional local pack-origin fallback", () => {
+  for (const file of ["deploy.mjs", "deploy-static.mjs", "static-deployment-authority.mjs"]) {
+    const source = readFileSync(join(import.meta.dirname, file), "utf8");
+    assert.doesNotMatch(source, /ws:\/\/127\.0\.0\.1:8787|LOCAL_PACK_LIVEHOST_WS_URL/);
+  }
+});
 
 function runner(calls, failAt) {
   return (command, arguments_, options) => {

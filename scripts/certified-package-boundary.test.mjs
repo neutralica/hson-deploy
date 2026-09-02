@@ -5,11 +5,13 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   CERTIFICATION_AUTHORITY,
+  LOCAL_PACK_LIVEHOST_WS_URL,
   PACK_STAGES,
   canonical_package_locations,
   combine_certification_capture,
   execute_certification,
   execute_pack,
+  resolve_pack_environment,
   resolve_deployment_root,
   write_certification_receipt,
 } from "../../hson-demo2/scripts/certified-package.mjs";
@@ -52,9 +54,9 @@ test("hson-demo2 owns one pack implementation and hson-live is only a consumer w
   );
 });
 
-test("pack enforces clean pinned source before capture and uses the existing artifact path once", () => {
+test("bare pack resolves the local simulation origin before work and uses it through static verification", () => {
   const calls = [];
-  const result = execute_pack({ deploymentRoot, run: successful_runner(calls), environment: { VITE_LIVEHOST_WS_URL: "wss://runtime.example" } });
+  const result = execute_pack({ deploymentRoot, run: successful_runner(calls), environment: {} });
   assert.deepEqual(PACK_STAGES, ["verify-source", "build-runtime", "verify-package-surfaces", "capture-normal-evidence", "materialize", "assemble-and-verify-explorer"]);
   assert.deepEqual(calls.map((call) => call.arguments_.join(" ")), [
     "run verify",
@@ -68,7 +70,38 @@ test("pack enforces clean pinned source before capture and uses the existing art
   assert.equal(calls.filter((call) => call.arguments_.includes("prepare:static-production")).length, 1);
   assert.equal(calls.at(-1).env.VITE_TEST_EVIDENCE_ROOT, "/test-evidence/0123456789012345678901234567890123456789");
   assert.equal(calls.at(-1).env.TEST_EVIDENCE_ACCEPTANCE_FILE, join(result.evidencePackage, "accepted.json"));
-  assert.equal(calls.at(-1).env.VITE_LIVEHOST_WS_URL, "wss://runtime.example");
+  assert.ok(calls.every((call) => call.env.VITE_LIVEHOST_WS_URL === LOCAL_PACK_LIVEHOST_WS_URL));
+  const deploymentPackage = JSON.parse(readFileSync(join(deploymentRoot, "package.json"), "utf8"));
+  assert.match(deploymentPackage.scripts["prepare:static-production"], /verify:static-production-artifact$/);
+});
+
+test("an explicit valid pack origin overrides the local default", () => {
+  const calls = [];
+  execute_pack({ deploymentRoot, run: successful_runner(calls), environment: { VITE_LIVEHOST_WS_URL: "wss://runtime.example?tenant=public" } });
+  assert.ok(calls.every((call) => call.env.VITE_LIVEHOST_WS_URL === "wss://runtime.example?tenant=public"));
+});
+
+test("missing and empty pack origins resolve to local simulation", () => {
+  assert.equal(resolve_pack_environment({}).VITE_LIVEHOST_WS_URL, LOCAL_PACK_LIVEHOST_WS_URL);
+  assert.equal(resolve_pack_environment({ VITE_LIVEHOST_WS_URL: "  " }).VITE_LIVEHOST_WS_URL, LOCAL_PACK_LIVEHOST_WS_URL);
+});
+
+test("an explicitly invalid pack origin fails before verification or capture", () => {
+  for (const value of ["not a URL", "https://runtime.example", "ws://runtime.example", "wss://runtime.example/towl"]) {
+    const calls = [];
+    assert.throws(() => execute_pack({ deploymentRoot, run: successful_runner(calls), environment: { VITE_LIVEHOST_WS_URL: value } }));
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("an explicitly invalid certification origin fails before the certification authority", () => {
+  const calls = [];
+  assert.throws(() => execute_certification({
+    deploymentRoot,
+    run: successful_runner(calls),
+    environment: { VITE_LIVEHOST_WS_URL: "ws://public.example" },
+  }), /must use wss:\/\//);
+  assert.deepEqual(calls, []);
 });
 
 test("a source verification failure stops before any execution or artifact generation", () => {
@@ -90,7 +123,7 @@ test("certify runs the full integrated authority and then the exact pack flow", 
   const result = execute_certification({
     deploymentRoot,
     run: successful_runner(calls),
-    environment: { VITE_LIVEHOST_WS_URL: "wss://runtime.example" },
+    environment: {},
     combineCapture({ normalCandidate, certificationCandidate }) {
       assert.match(certificationCandidate, /certification-fixture$/);
       return normalCandidate;
@@ -109,7 +142,7 @@ test("certify runs the full integrated authority and then the exact pack flow", 
   ]);
   assert.equal(calls.filter((call) => call.arguments_.includes("capture:deployment-tests:normal")).length, 1);
   assert.equal(calls.filter((call) => call.arguments_.includes("capture:deployment-tests:certification")).length, 1);
-  assert.equal(calls.at(-1).env.VITE_LIVEHOST_WS_URL, "wss://runtime.example");
+  assert.ok(calls.every((call) => call.env.VITE_LIVEHOST_WS_URL === LOCAL_PACK_LIVEHOST_WS_URL));
   assert.equal(receipts.length, 1);
   assert.equal(result.certified, true);
   assert.deepEqual(result.certificationReceipt, { path: "receipt.json" });
