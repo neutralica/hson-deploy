@@ -1,6 +1,4 @@
-import { validate_accepted_static_test_evidence } from "./static-test-evidence-config.mjs";
-import { validate_livehost_browser_configuration } from "./livehost-browser-config.mjs";
+import { verify_static_production_artifact } from "./verify-static-production-artifact.mjs";
 
-const evidence = validate_accepted_static_test_evidence();
-const liveHost = validate_livehost_browser_configuration();
-console.log(`Static production preflight: accepted frozen evidence ${evidence.root} with ${evidence.rows} public row artifacts and LiveHost origin ${liveHost.origin} verified.`);
+const result = await verify_static_production_artifact({ requireSecurePublic: process.argv.includes("--public") });
+console.log(`Static production preflight: immutable report ${result.evidenceRoot} (${result.reportStatus}) and frozen visitor boundary verified.`);

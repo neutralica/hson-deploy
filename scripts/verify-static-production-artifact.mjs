@@ -1,131 +1,105 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { validate_accepted_static_test_evidence } from "./static-test-evidence-config.mjs";
+import { fileURLToPath } from "node:url";
 import { validate_livehost_browser_configuration } from "./livehost-browser-config.mjs";
+import { RUN_ID_PATTERN, validate_progressive_report_site } from "./static-report.mjs";
 
-function files(directory) {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+export const STATIC_CONFIG_FILE = "static-report-config.json";
+const VISITOR_EXECUTION_MARKERS = [
+  "tests.discover",
+  "tests.runSelected",
+  "tests.inspect",
+  "tests.cancel",
+  "make_remote_hosted_test_runtime",
+  "HostedTestPanelRuntime",
+  "HostedTestPanelAdapter",
+  "run-canonical-tests.node",
+  "capture:deployment-tests",
+  "supervise-certification-capture",
+];
+
+async function walk(directory, root = directory) {
+  const output = [];
+  const state = await lstat(directory).catch(() => undefined);
+  if (state === undefined || state.isSymbolicLink() || !state.isDirectory()) throw new Error(`Static production path is missing or unsafe: ${directory}.`);
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);
-    return entry.isDirectory() ? files(path) : [path];
-  });
+    if (!path.startsWith(`${root}/`)) throw new Error(`Static production path escapes its artifact: ${path}.`);
+    if (entry.isSymbolicLink()) throw new Error(`Static production artifact contains a symlink: ${path}.`);
+    if (entry.isDirectory()) output.push(...await walk(path, root));
+    else if (entry.isFile()) output.push(path);
+    else throw new Error(`Static production artifact contains an unsafe entry: ${path}.`);
+  }
+  return output;
 }
 
-function artifact_sources(artifact) {
-  return files(artifact)
-    .filter((path) => /\.(?:html|js|css)$/.test(path))
-    .map((path) => readFileSync(path, "utf8"));
+async function configuration(artifact) {
+  const path = resolve(artifact, STATIC_CONFIG_FILE);
+  let value;
+  try {
+    const state = await lstat(path);
+    if (state.isSymbolicLink() || !state.isFile() || state.size > 64 * 1024) throw new Error("unsafe configuration file");
+    value = JSON.parse(await readFile(path, "utf8"));
+  }
+  catch (cause) { throw new Error(`Static production configuration is missing or malformed at ${path}.`, { cause }); }
+  if (value?.schemaVersion !== 1 || typeof value.testEvidenceRoot !== "string" || typeof value.runId !== "string" || typeof value.liveHostWebSocketOrigin !== "string") {
+    throw new Error("Static production configuration has an invalid shape.");
+  }
+  if (!RUN_ID_PATTERN.test(value.runId) || value.testEvidenceRoot !== `/test-evidence/${value.runId}`) throw new Error("Static production configuration does not identify one immutable report root.");
+  return Object.freeze(value);
 }
 
-export function resolve_embedded_livehost_browser_configuration(options = {}) {
-  const root = resolve(import.meta.dirname, "..");
-  const artifact = resolve(options.artifact ?? resolve(root, "static-production"));
-  const values = new Set();
-  const pattern = /(?:["']VITE_LIVEHOST_WS_URL["']|\bVITE_LIVEHOST_WS_URL)\s*:\s*(["'])([^"'\\]+)\1/g;
-  for (const source of artifact_sources(artifact)) {
-    for (const match of source.matchAll(pattern)) values.add(match[2]);
-  }
-  if (values.size === 0) {
-    throw new Error("Static production artifact does not identify its embedded VITE_LIVEHOST_WS_URL.");
-  }
-  if (values.size !== 1) {
-    throw new Error(`Static production artifact contains ambiguous embedded VITE_LIVEHOST_WS_URL values: ${[...values].sort().join(", ")}.`);
-  }
-  return validate_livehost_browser_configuration({ VITE_LIVEHOST_WS_URL: [...values][0] });
+export async function resolve_embedded_livehost_browser_configuration(options = {}) {
+  const artifact = resolve(options.artifact ?? resolve(import.meta.dirname, "..", "static-production"));
+  const config = await configuration(artifact);
+  return validate_livehost_browser_configuration({ VITE_LIVEHOST_WS_URL: config.liveHostWebSocketOrigin });
 }
 
-function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
-
-function public_json(publicRoot, reference, kind) {
-  if (typeof reference?.path !== "string" || !new RegExp(`^${kind}/[A-Za-z0-9_-]+\\.json$`).test(reference.path)) throw new Error(`Public frozen index has an invalid ${kind} path.`);
-  const path = resolve(publicRoot, reference.path);
-  if (!path.startsWith(`${publicRoot}/`) || !existsSync(path)) throw new Error(`Public frozen artifact is missing: ${reference.path}.`);
-  const bytes = readFileSync(path);
-  if (bytes.byteLength !== reference.rawBytes || sha256(bytes) !== reference.sha256 || statSync(path).size !== reference.rawBytes) throw new Error(`Public frozen artifact metadata mismatch: ${reference.path}.`);
-  return { path: reference.path, bytes, value: JSON.parse(bytes.toString("utf8")) };
-}
-
-function public_references(index, publicRoot) {
-  const records = [];
-  const suites = new Set();
-  const cases = new Set();
-  for (const category of index.categories ?? []) {
-    const categoryRecord = public_json(publicRoot, category.listing, "categories");
-    if (categoryRecord.value.categoryId !== category.id) throw new Error(`Public frozen category identity mismatch: ${category.id}.`);
-    records.push(categoryRecord);
-    for (const suite of categoryRecord.value.suites ?? []) {
-      if (suite.categoryId !== category.id || suites.has(suite.id)) throw new Error(`Public frozen suite category or identity mismatch: ${suite.id}.`);
-      suites.add(suite.id);
-      const suiteRecord = public_json(publicRoot, suite.listing, "suites");
-      if (suiteRecord.value.categoryId !== category.id || suiteRecord.value.suiteId !== suite.id) throw new Error(`Public frozen suite envelope identity mismatch: ${suite.id}.`);
-      records.push(suiteRecord);
-      for (const item of suiteRecord.value.cases ?? []) {
-        if (cases.has(item.id) || item.id !== `${suite.id}::${item.caseId}`) throw new Error(`Public frozen case identity mismatch: ${item.id}.`);
-        cases.add(item.id);
-        if (item.evidence?.available !== true) continue;
-        const caseRecord = public_json(publicRoot, item.evidence, "cases");
-        if (caseRecord.value.suiteId !== suite.id || caseRecord.value.caseId !== item.id) throw new Error(`Public frozen case envelope identity mismatch: ${item.id}.`);
-        records.push(caseRecord);
-      }
-    }
-  }
-  return records;
-}
-
-export function verify_static_production_artifact(options = {}) {
-  const root = resolve(import.meta.dirname, "..");
-  const artifact = resolve(options.artifact ?? resolve(root, "static-production"));
-  const environment = options.environment ?? process.env;
-  const evidence = validate_accepted_static_test_evidence(environment);
-  const liveHost = validate_livehost_browser_configuration(environment);
-  const publicRoot = resolve(artifact, evidence.root.slice(1));
-  if (!existsSync(resolve(artifact, "index.html"))) throw new Error("Static production artifact is missing static-production/index.html.");
-  if (!existsSync(resolve(publicRoot, "index.json"))) throw new Error("Static production artifact is missing its public frozen index.");
-  if (existsSync(resolve(publicRoot, "reports")) || existsSync(resolve(publicRoot, "provenance.json"))) throw new Error("Static production artifact exposes archive-only frozen evidence.");
-
-  const sources = artifact_sources(artifact);
-  if (!sources.some((source) => source.includes(evidence.root))) throw new Error("Static production artifact does not contain the exact accepted VITE_TEST_EVIDENCE_ROOT.");
-  const embeddedRoots = [...sources.join("\n").matchAll(/\/test-evidence\/([0-9a-f]{40})/g)].map((match) => match[1]);
-  if (embeddedRoots.some((commit) => commit !== evidence.deploymentCommit)) throw new Error("Static production artifact contains a stale test-evidence root.");
-  if (sources.some((source) => /\/test-evidence\/(?:latest|current)(?:[/?#"']|$)/i.test(source))) throw new Error("Static production artifact contains a mutable test-evidence root.");
-
-  const liveClientSources = sources.filter((source) => source.includes(liveHost.configured));
-  if (liveClientSources.length === 0) {
-    throw new Error("Static production artifact does not contain the configured VITE_LIVEHOST_WS_URL.");
-  }
-  if (!liveClientSources.some((source) => source.includes("/towl") && source.includes("/circuit-verification"))) {
-    throw new Error("Static production artifact does not bind the configured LiveHost origin to the expected live application routes.");
-  }
-  for (const obsolete of ["VITE_HOSTED_TEST_WS_URL", "VITE_TOWL_WS_URL", "VITE_CIRCUIT_VERIFICATION_WS_URL"]) {
-    if (sources.some((source) => source.includes(obsolete))) {
-      throw new Error(`Static production artifact retains obsolete LiveHost configuration marker: ${obsolete}.`);
-    }
-  }
-  const unconditionalTowlLoopback = sources.some((source) => (
-    /(?:const|let|var)\s+[A-Za-z_$][\w$]*=["']ws:\/\/127\.0\.0\.1:8787["'][\s\S]{0,220}\.pathname=["']\/towl["']/.test(source)
-  ));
-  if (!liveHost.localSimulation && unconditionalTowlLoopback) {
-    throw new Error("Static production artifact contains an unconditional TOWL loopback endpoint.");
+export async function verify_static_production_artifact(options = {}) {
+  const artifact = resolve(options.artifact ?? resolve(import.meta.dirname, "..", "static-production"));
+  if (!existsSync(resolve(artifact, "index.html"))) throw new Error("Static production artifact is missing index.html.");
+  const files = await walk(artifact);
+  const config = await configuration(artifact);
+  const liveHost = validate_livehost_browser_configuration({ VITE_LIVEHOST_WS_URL: config.liveHostWebSocketOrigin });
+  if (options.requireSecurePublic === true && (liveHost.localSimulation || !config.liveHostWebSocketOrigin.startsWith("wss://"))) {
+    throw new Error("Static deployment requires a public wss:// LiveHost origin.");
   }
 
-  const frozenPanelSources = sources.filter((source) => source.includes("data-frozen-panel-state") || source.includes("frozen-test-panel"));
-  if (frozenPanelSources.length === 0) throw new Error("Static production artifact is missing the frozen test panel chunk.");
-  for (const forbidden of ["tests.discover", "tests.runSelected", "tests.inspect", "tests.cancel", "make_remote_hosted_test_runtime", "HostedTestPanelRuntime", "HostedTestPanelAdapter"]) {
-    if (frozenPanelSources.some((source) => source.includes(forbidden))) throw new Error(`Frozen test panel production chunk retains live hosted-test acquisition marker: ${forbidden}.`);
+  const evidenceDirectory = resolve(artifact, config.testEvidenceRoot.slice(1));
+  const evidenceParent = resolve(artifact, "test-evidence");
+  const roots = await readdir(evidenceParent, { withFileTypes: true }).catch(() => []);
+  if (roots.length !== 1 || !roots[0].isDirectory() || roots[0].isSymbolicLink() || roots[0].name !== config.runId) {
+    throw new Error("Static production artifact must contain exactly its configured immutable report root.");
   }
+  const report = await validate_progressive_report_site({ runId: config.runId, site: evidenceDirectory });
 
-  const index = JSON.parse(readFileSync(resolve(publicRoot, "index.json"), "utf8"));
-  if (JSON.stringify(index).includes("reports/")) throw new Error("Public frozen index references an omitted canonical report.");
-  const references = public_references(index, publicRoot);
-  const rowBytes = references.reduce((total, record) => total + record.bytes.byteLength, 0);
-  const referenced = new Set(["index.json", ...references.map((record) => record.path)]);
-  const actualEvidenceFiles = files(publicRoot).map((path) => path.slice(publicRoot.length + 1));
-  if (actualEvidenceFiles.some((path) => !referenced.has(path))) throw new Error("Static production artifact contains an unreferenced public frozen artifact.");
-  return Object.freeze({ evidenceRoot: evidence.root, liveHostOrigin: liveHost.origin, frozenPanelSources: frozenPanelSources.length, rowArtifacts: references.length, rowBytes });
+  const sourcePaths = files.filter((path) => /\.(?:html|js|css)$/.test(path));
+  const sources = await Promise.all(sourcePaths.map(async (path) => {
+    const state = await lstat(path);
+    if (state.size > 16 * 1024 * 1024) throw new Error(`Static application source exceeds the byte limit: ${path}.`);
+    return readFile(path, "utf8");
+  }));
+  if (!sources.some((source) => source.includes(config.testEvidenceRoot))) throw new Error("Static application does not embed the configured immutable report root.");
+  if (!sources.some((source) => source.includes(config.liveHostWebSocketOrigin))) throw new Error("Static application does not embed the configured LiveHost origin.");
+  const otherRoots = sources.join("\n").match(/\/test-evidence\/[0-9a-f-]{36}/gi) ?? [];
+  if (otherRoots.some((root) => root !== config.testEvidenceRoot)) throw new Error("Static application contains a different report root.");
+  if (sources.some((source) => /\/test-evidence\/(?:latest|current)(?:[/?#"']|$)/i.test(source))) throw new Error("Static application contains a mutable report root.");
+
+  const frozenSources = sources.filter((source) => source.includes("data-frozen-panel-state") || source.includes("frozen-test-panel"));
+  if (frozenSources.length === 0) throw new Error("Static application is missing the frozen Tests explorer.");
+  for (const marker of VISITOR_EXECUTION_MARKERS) {
+    if (frozenSources.some((source) => source.includes(marker))) throw new Error(`Frozen Tests explorer retains visitor execution capability: ${marker}.`);
+  }
+  return Object.freeze({ artifact, evidenceRoot: config.testEvidenceRoot, runId: config.runId, reportStatus: report.status, liveHostOrigin: liveHost.origin, files: files.length, referencedReportFiles: report.referencedFiles, visitorExecutionAbsent: true });
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = verify_static_production_artifact();
-  console.log(`Static production artifact: ${result.rowArtifacts} frozen row artifacts match raw bytes; exact root ${result.evidenceRoot} and LiveHost origin ${result.liveHostOrigin} are embedded; the frozen panel excludes hosted-test acquisition.`);
+  try {
+    const result = await verify_static_production_artifact({ requireSecurePublic: process.argv.includes("--public") });
+    console.log(`Static production artifact contains immutable ${result.evidenceRoot} (${result.reportStatus}); frozen visitor execution is absent.`);
+  } catch (error) {
+    console.error(`verify:static-production-artifact: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }

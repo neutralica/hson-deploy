@@ -3,19 +3,14 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assert_publication_suitable, resolve_static_artifact_verification } from "./static-deployment-authority.mjs";
+import { verify_static_production_artifact } from "./verify-static-production-artifact.mjs";
 
 export const PAGES_PROJECT = "hson-deploy";
 export const PAGES_BRANCH = "main";
 export const STATIC_DIRECTORY = "static-production";
 
 function run_command(command, arguments_, options = {}) {
-  return execFileSync(command, arguments_, {
-    cwd: options.cwd,
-    env: options.env,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
-  });
+  return execFileSync(command, arguments_, { cwd: options.cwd, env: options.env, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] });
 }
 
 function parse_json(output, label) {
@@ -29,41 +24,26 @@ function project_names(projects) {
   return projects.map((project) => project?.name ?? project?.project_name ?? project?.["Project Name"]).filter((name) => typeof name === "string");
 }
 
-export function execute_static_deploy(options = {}) {
+export async function execute_static_deploy(options = {}) {
   const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
+  const artifact = resolve(options.artifact ?? resolve(deploymentRoot, STATIC_DIRECTORY));
   const run = options.run ?? run_command;
-  const suppliedEnvironment = options.environment ?? process.env;
-  const authority = (options.resolveVerification ?? resolve_static_artifact_verification)({
-    deploymentRoot,
-    environment: suppliedEnvironment,
-  });
-  assert_publication_suitable(authority);
-  const environment = { ...suppliedEnvironment, ...authority.environment };
-
-  run("npm", ["run", "verify:static-production-artifact"], { cwd: deploymentRoot, env: environment });
+  const environment = options.environment ?? process.env;
+  const verification = await (options.verifyArtifact ?? verify_static_production_artifact)({ artifact, requireSecurePublic: true });
 
   const projects = parse_json(run("wrangler", ["pages", "project", "list", "--json"], { cwd: deploymentRoot, env: environment }), "Wrangler Pages project guard");
   const names = project_names(projects);
-  if (!names.includes(PAGES_PROJECT)) {
-    throw new Error(`Cloudflare Pages project guard failed: expected ${PAGES_PROJECT}; available projects: ${names.join(", ") || "(none)"}.`);
-  }
+  if (!names.includes(PAGES_PROJECT)) throw new Error(`Cloudflare Pages project guard failed: expected ${PAGES_PROJECT}; available projects: ${names.join(", ") || "(none)"}.`);
 
-  const commit = authority.evidenceRoot.slice("/test-evidence/".length);
-  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error("Static artifact evidence root does not identify an exact deployment commit.");
-  const output = run("wrangler", [
-    "pages", "deploy", STATIC_DIRECTORY,
-    `--project-name=${PAGES_PROJECT}`,
-    `--branch=${PAGES_BRANCH}`,
-    `--commit-hash=${commit}`,
-    "--commit-dirty=false",
-  ], { cwd: deploymentRoot, env: environment });
-  console.log(`Cloudflare Pages accepted ${STATIC_DIRECTORY}/ for project ${PAGES_PROJECT}.`);
+  const uploadDirectory = artifact === resolve(deploymentRoot, STATIC_DIRECTORY) ? STATIC_DIRECTORY : artifact;
+  const output = run("wrangler", ["pages", "deploy", uploadDirectory, `--project-name=${PAGES_PROJECT}`, `--branch=${PAGES_BRANCH}`], { cwd: deploymentRoot, env: environment });
+  console.log(`Cloudflare Pages accepted the existing ${uploadDirectory} artifact for project ${PAGES_PROJECT}.`);
   if (output.trim()) process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
-  return Object.freeze({ project: PAGES_PROJECT, branch: PAGES_BRANCH, directory: authority.artifact, commit, output });
+  return Object.freeze({ project: PAGES_PROJECT, branch: PAGES_BRANCH, directory: artifact, verification, output });
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { execute_static_deploy(); }
+  try { await execute_static_deploy(); }
   catch (error) {
     console.error(`deploy:static: ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
