@@ -44,18 +44,19 @@ test("missing and malformed reports are rejected before application build", asyn
   assert.equal(calls.length, 0);
 });
 
-for (const status of ["fail", "cancelled", "error"]) {
+for (const status of ["pass", "fail", "skip", "unsupported", "cancelled", "error"]) {
   test(`a structurally valid ${status} report builds and remains ${status} evidence`, async () => {
     const fixture = await workspace(status);
     const calls = [];
     const result = await build_static({ deploymentRoot: fixture.deploymentRoot, reportRoots: [fixture.reports], runId: FIXTURE_RUN_ID, environment: PUBLIC_ENV, run: application_builder(calls) });
     assert.equal(result.report.status, status);
+    assert.deepEqual(result.report.siteValidation.runId, FIXTURE_RUN_ID);
     assert.equal(result.verification.reportStatus, status);
     assert.equal(result.evidenceRoot, `/test-evidence/${FIXTURE_RUN_ID}`);
     assert.equal(existsSync(join(result.artifact, "test-evidence", FIXTURE_RUN_ID, "index.json")), true);
     assert.match(readFileSync(join(result.artifact, "assets", "app.js"), "utf8"), new RegExp(`/test-evidence/${FIXTURE_RUN_ID}`));
     assert.deepEqual(calls.map(({ command, arguments_ }) => `${command} ${arguments_.slice(0, 4).join(" ")}`), ["npm -w hson-demo2 run build"]);
-    assert.doesNotMatch(calls[0].arguments_.join(" "), /test:|certif|capture|submodule|subs:update/);
+    assert.doesNotMatch(calls[0].arguments_.join(" "), /test:|playwright|git|submodule/);
   });
 }
 

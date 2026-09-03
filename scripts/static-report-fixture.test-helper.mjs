@@ -9,7 +9,8 @@ export async function make_direct_report(root, options = {}) {
   const runDirectory = join(root, runId);
   const site = join(runDirectory, "site");
   await Promise.all(["categories", "suites", "cases", "artifacts"].map((folder) => mkdir(join(site, folder), { recursive: true })));
-  const totals = { pass: status === "pass" ? 1 : 0, fail: status === "fail" ? 1 : 0, skip: 0, unsupported: 0, cancelled: status === "cancelled" ? 1 : 0, error: status === "error" ? 1 : 0, cases: 1, suites: 1 };
+  const totals = Object.fromEntries(["pass", "fail", "skip", "unsupported", "cancelled", "error"].map((terminal) => [terminal, terminal === status ? 1 : 0]));
+  Object.assign(totals, { cases: 1, suites: 1 });
   const timing = { startedAt: "2026-09-03T00:00:00.000Z", endedAt: "2026-09-03T00:00:01.000Z", durationMs: 1000 };
   const caseReference = { id: "observed case", title: "Observed case", status, ...timing, file: "cases/observed-case.json" };
   const suiteSummary = { id: "unit/observed", title: "Observed suite", category: "unit", status, ...timing, totals, file: "suites/unit-observed.json" };

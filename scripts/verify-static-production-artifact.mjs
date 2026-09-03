@@ -15,8 +15,6 @@ const VISITOR_EXECUTION_MARKERS = [
   "HostedTestPanelRuntime",
   "HostedTestPanelAdapter",
   "run-canonical-tests.node",
-  "capture:deployment-tests",
-  "supervise-certification-capture",
 ];
 
 async function walk(directory, root = directory) {

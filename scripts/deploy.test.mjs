@@ -1,17 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
-import { execute_deploy } from "./deploy.mjs";
 
-test("ordinary deploy routes only to deployment of the existing static artifact", () => {
-  const calls = [];
-  const environment = { CLOUDFLARE_API_TOKEN: "fixture" };
-  const result = execute_deploy({
-    deploymentRoot: "/fixture/hson-deploy",
-    environment,
-    run(command, arguments_, options) { calls.push({ command, arguments_, options }); return ""; },
-  });
-  assert.deepEqual(result, { route: "static" });
-  assert.deepEqual(calls.map(({ command, arguments_ }) => `${command} ${arguments_.join(" ")}`), ["npm run deploy:static"]);
-  assert.equal(calls[0].options.env, environment);
-  assert.doesNotMatch(calls[0].arguments_.join(" "), /latest|build|test:|certif|capture|subs:update|submodule/);
+test("deploy is the direct public alias for static upload", () => {
+  const root = resolve(import.meta.dirname, "..");
+  const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+  assert.equal(manifest.scripts.deploy, "npm run deploy:static");
+  const sources = ["build-static.mjs", "deploy-static.mjs"].map((file) => readFileSync(resolve(import.meta.dirname, file), "utf8")).join("\n");
+  assert.doesNotMatch(sources, /playwright|run-canonical-tests|tests\.runSelected|git\s+(?:fetch|pull|checkout|merge|rebase|submodule)/i);
 });

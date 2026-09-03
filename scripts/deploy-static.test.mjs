@@ -28,7 +28,7 @@ test("deploy:static validates then uploads the exact existing artifact to the gu
     `wrangler pages deploy ${STATIC_DIRECTORY} --project-name=${PAGES_PROJECT} --branch=${PAGES_BRANCH}`,
   ]);
   assert.equal(result.directory, "/fixture/hson-deploy/static-production");
-  assert.doesNotMatch(calls.map(({ command, arguments_ }) => `${command} ${arguments_.join(" ")}`).join("\n"), /npm|build|test:|certif|capture|subs:update|submodule/);
+  assert.doesNotMatch(calls.map(({ command, arguments_ }) => `${command} ${arguments_.join(" ")}`).join("\n"), /npm|build|test:|playwright|git|submodule/);
 });
 
 test("malformed or insecure artifacts stop before provider access", async () => {

@@ -45,17 +45,21 @@ npm run deploy:static
 This validates the existing artifact, requires its embedded public runtime
 origin to use `wss://`, confirms the authenticated account exposes the existing
 Cloudflare Pages project `hson-deploy`, and uploads those exact bytes to its
-`main` branch. It does not build, run tests, capture or certify evidence, update
-submodules, or change a checkout. `npm run deploy` is the user-facing route to
-this same static upload behavior. Neither command creates a Pages project or
-changes custom domains.
+`main` branch. It does not build, run tests, update submodules, or change a
+checkout. `npm run deploy` is the direct user-facing alias for this same static
+upload behavior. Neither command creates a Pages project or changes custom
+domains.
 
 The frozen Tests explorer uses ordinary static HTTP reads. It has no visitor
-path for TestRunner, subprocess, Playwright, certification, cancellation, or
-hosted-report acquisition. Product WebSockets remain available for TOWL and
-circuit behavior through `VITE_LIVEHOST_WS_URL`; this variable must identify an
-origin rather than an application route. Never put bearer tokens or other
-credentials in a `VITE_*` variable.
+path for TestRunner, subprocess, Playwright, cancellation, or test discovery.
+Product WebSockets remain available for TOWL and circuit behavior through
+`VITE_LIVEHOST_WS_URL`; this variable must identify an origin rather than an
+application route. Never put bearer tokens or other credentials in a `VITE_*`
+variable.
+
+Never edit `hson-deploy` submodules directly. Make source changes in the owning
+repository and update the gitlink downstream. Source synchronization is an
+explicit repository-maintenance action and is never part of deployment.
 
 ## Node production runtime
 

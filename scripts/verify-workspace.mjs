@@ -37,18 +37,6 @@ try {
     requireRevision(directory, expected, packageName);
   }
 
-  const invokingApplicationRoot = process.env.HSON_INVOKING_APPLICATION_ROOT?.trim();
-  if (invokingApplicationRoot) {
-    const invoking = resolve(invokingApplicationRoot);
-    const invokingLibrary = resolve(invoking, "..", "hson-live");
-    for (const [directory, packageName] of [[invoking, "hson-demo2"], [invokingLibrary, "hson-live"]]) {
-      if (!existsSync(resolve(directory, ".git"))) throw new Error(`invoking ${packageName} checkout is missing at ${directory}.`);
-      const expected = /^160000 commit ([0-9a-f]{40})\t/.exec(git(["ls-tree", "HEAD", "--", packageName]))?.[1];
-      if (expected === undefined) throw new Error(`${packageName} is not pinned as a gitlink in the deployment workspace.`);
-      requireRevision(directory, expected, `invoking ${packageName}`);
-    }
-  }
-
   console.log("workspace verification: hson-live and hson-demo2 match clean deployment gitlinks");
 } catch (error) {
   console.error(`workspace verification failed: ${error.message}`);
