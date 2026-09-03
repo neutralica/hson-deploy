@@ -40,6 +40,7 @@
     "deploy": "node scripts/deploy.mjs",
     "deploy:latest": "node scripts/deploy-latest.mjs",
     "push": "git push",
-    "deploy:worker": "node scripts/deploy-worker.mjs"
+    "deploy:worker": "node scripts/deploy-worker.mjs",
+  "test:report": "npm -w hson-demo2 run test:report"
   }
 }
