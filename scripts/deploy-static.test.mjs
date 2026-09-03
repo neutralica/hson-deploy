@@ -18,7 +18,7 @@ test("deploy:static validates then uploads the exact existing artifact to the gu
   const verifications = [];
   const result = await execute_static_deploy({
     deploymentRoot: "/fixture/hson-deploy",
-    environment: {},
+    environment: { CLOUDFLARE_API_TOKEN: "fixture" },
     run: runner(calls),
     verifyArtifact: async (options) => { verifications.push(options); return verification; },
   });
@@ -33,21 +33,21 @@ test("deploy:static validates then uploads the exact existing artifact to the gu
 
 test("malformed or insecure artifacts stop before provider access", async () => {
   const calls = [];
-  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: {}, run: runner(calls), verifyArtifact: async () => { throw new Error("Static deployment requires a public wss:// LiveHost origin."); } }), /public wss:\/\//);
+  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: { CLOUDFLARE_API_TOKEN: "fixture" }, run: runner(calls), verifyArtifact: async () => { throw new Error("Static deployment requires a public wss:// LiveHost origin."); } }), /public wss:\/\//);
   assert.deepEqual(calls, []);
 
-  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: {}, run: runner(calls), verifyArtifact: async () => { throw new Error("Static production configuration is malformed."); } }), /configuration is malformed/);
+  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: { CLOUDFLARE_API_TOKEN: "fixture" }, run: runner(calls), verifyArtifact: async () => { throw new Error("Static production configuration is malformed."); } }), /configuration is malformed/);
   assert.deepEqual(calls, []);
 });
 
 test("wrong Pages target stops before upload", async () => {
   const calls = [];
-  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: {}, run: runner(calls, [{ "Project Name": "wrong-project" }]), verifyArtifact: async () => verification }), /expected hson-deploy/);
+  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: { CLOUDFLARE_API_TOKEN: "fixture" }, run: runner(calls, [{ "Project Name": "wrong-project" }]), verifyArtifact: async () => verification }), /expected hson-deploy/);
   assert.equal(calls.filter(({ arguments_ }) => arguments_.includes("deploy")).length, 0);
 });
 
 test("unnamed project rows cannot satisfy the target guard", async () => {
   const calls = [];
-  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: {}, run: runner(calls, [{ domains: "hson-deploy.pages.dev" }]), verifyArtifact: async () => verification }), /available projects: \(none\)/);
+  await assert.rejects(execute_static_deploy({ deploymentRoot: "/fixture/hson-deploy", environment: { CLOUDFLARE_API_TOKEN: "fixture" }, run: runner(calls, [{ domains: "hson-deploy.pages.dev" }]), verifyArtifact: async () => verification }), /available projects: \(none\)/);
   assert.equal(calls.filter(({ arguments_ }) => arguments_.includes("deploy")).length, 0);
 });

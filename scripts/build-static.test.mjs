@@ -35,6 +35,20 @@ test("explicit run selection and current.json resolve the same direct report", a
   assert.equal((await resolve_direct_report({ deploymentRoot: fixture.deploymentRoot, reportRoots: [fixture.reports] })).runId, FIXTURE_RUN_ID);
 });
 
+test("one build resolves its report exactly once and retains that pinned run", async () => {
+  const fixture = await workspace();
+  let resolutions = 0;
+  const result = await build_static({
+    deploymentRoot: fixture.deploymentRoot,
+    environment: PUBLIC_ENV,
+    resolveReport: async () => { resolutions += 1; return resolve_direct_report({ deploymentRoot: fixture.deploymentRoot, reportRoots: [fixture.reports], runId: FIXTURE_RUN_ID }); },
+    run: application_builder([]),
+  });
+  assert.equal(resolutions, 1);
+  assert.equal(result.report.runId, FIXTURE_RUN_ID);
+  assert.equal(result.evidenceRoot, `/test-evidence/${FIXTURE_RUN_ID}`);
+});
+
 test("missing and malformed reports are rejected before application build", async () => {
   const fixture = await workspace();
   await assert.rejects(resolve_direct_report({ deploymentRoot: fixture.deploymentRoot, reportRoots: [fixture.reports], runId: "22222222-2222-4222-8222-222222222222" }), /was not found/);
@@ -84,6 +98,18 @@ test("successful build atomically replaces the previous artifact and removes own
   assert.equal(existsSync(join(artifact, "stale.txt")), false);
   assert.equal(existsSync(join(artifact, "index.html")), true);
   assert.deepEqual((await readdir(fixture.deploymentRoot)).filter((name) => name.startsWith(".static-production-build-") || name.startsWith("static-production.previous-")), []);
+});
+
+test("separate builds use unique candidate output directories", async () => {
+  const fixture = await workspace();
+  const outputs = [];
+  const builder = (command, arguments_, options) => {
+    outputs.push(arguments_[arguments_.indexOf("--outDir") + 1]);
+    return application_builder([])(command, arguments_, options);
+  };
+  await build_static({ deploymentRoot: fixture.deploymentRoot, reportRoots: [fixture.reports], runId: FIXTURE_RUN_ID, environment: PUBLIC_ENV, run: builder });
+  await build_static({ deploymentRoot: fixture.deploymentRoot, reportRoots: [fixture.reports], runId: FIXTURE_RUN_ID, environment: PUBLIC_ENV, run: builder });
+  assert.equal(new Set(outputs).size, 2);
 });
 
 test("a failed application build preserves the existing artifact", async () => {

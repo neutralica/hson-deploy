@@ -36,7 +36,7 @@ infrastructure-error reports are valid publication inputs when structurally
 safe. Report status and recorded source revisions are descriptive evidence, not
 publication gates.
 
-Deploy only after the artifact exists:
+Deploy only the existing artifact with:
 
 ```sh
 npm run deploy:static
@@ -46,9 +46,49 @@ This validates the existing artifact, requires its embedded public runtime
 origin to use `wss://`, confirms the authenticated account exposes the existing
 Cloudflare Pages project `hson-deploy`, and uploads those exact bytes to its
 `main` branch. It does not build, run tests, update submodules, or change a
-checkout. `npm run deploy` is the direct user-facing alias for this same static
-upload behavior. Neither command creates a Pages project or changes custom
-domains.
+checkout. It does not create a Pages project or change custom domains.
+
+## Complete production deployment
+
+Set the existing production TOWL Worker origin and run the complete deployment:
+
+```sh
+HSON_TOWL_WORKER_WS_ORIGIN=wss://<existing-worker-origin> npm run deploy
+```
+
+The command performs one serial operation:
+
+```text
+acquire .deployment-lock/
+  → verify runtime, workspace, and gitlinks read-only
+  → select one direct report once
+  → build and verify static-production/ once
+  → typecheck the Worker
+  → verify authentication and both existing provider targets
+  → prove the embedded WebSocket origin equals the Worker target origin
+  → prove the Worker admits the production Pages origin
+  → deploy the TOWL Worker
+  → upload the exact already-built static-production/ artifact
+release .deployment-lock/
+```
+
+All local, authentication, and target checks finish before the first upload.
+Worker-first ordering leaves the previous static site using the stable endpoint
+if the Pages upload later fails. The accepted partial-failure state is therefore
+new Worker plus previous static site; there is no automatic rollback or retry.
+
+`build:static`, `deploy:static`, `deploy:worker`, and `deploy` share one atomic
+checkout-local lock. A concurrent command fails immediately and reports the
+recorded PID, start time, and command. A crashed process may leave a stale lock;
+confirm no deployment is running and manually remove only `.deployment-lock/`
+before retrying. The lock is never removed based on age and is not distributed.
+
+The production Worker target derives its name and entrypoint from
+`hson-demo2/wrangler.jsonc`. Its explicit public WebSocket origin and accepted
+static origins are governed by
+`hson-demo2/deployment/towl-worker-target.json`. The full deploy embeds that
+exact Worker origin, rather than accepting an independently selected
+`VITE_LIVEHOST_WS_URL`.
 
 The frozen Tests explorer uses ordinary static HTTP reads. It has no visitor
 path for TestRunner, subprocess, Playwright, cancellation, or test discovery.
@@ -79,11 +119,19 @@ It does not deploy or publish. It requires production
 ## Worker compatibility deployment
 
 `npm run deploy:worker` remains the separate Cloudflare Worker compatibility
-deployment for production `/session` and `/towl` behavior. It does not publish
-the static application or run hosted tests. Its local preflight retains runtime,
-workspace, type, package-resolution, and credential checks relevant to the
-Worker deployment.
+deployment for production `/session` and `/towl` behavior. It acquires the same
+local lock, verifies the workspace and gitlinks read-only, builds `hson-live`
+once, typechecks the Worker, validates authentication and the existing Worker
+target, and uploads only that Worker. It does not build or publish the static
+application, run product or hosted tests, run `npm ci` or `npm pack`, or invoke
+broad repository checks.
 
 Use Node `>=22.12.0 <25` and npm `>=10 <12`. Worker deployment requires a
-`CLOUDFLARE_API_TOKEN` or an authenticated Wrangler session. Static and Worker
-deployment are separate explicit operator actions.
+`CLOUDFLARE_API_TOKEN` or an authenticated Wrangler session, plus
+`HSON_TOWL_WORKER_WS_ORIGIN` identifying the existing production Worker origin.
+
+There is no deployment `pack` operation and no certification, receipt, capture,
+or admission step. `build:static` is deployment-artifact construction. Ordinary
+`npm pack` package tests and VS Code extension packaging remain unrelated and
+are unreachable from deployment. No deployment command runs product tests or
+mutates Git/submodules.

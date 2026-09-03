@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { validate_livehost_browser_configuration } from "./livehost-browser-config.mjs";
 import { validate_direct_report, validate_run_id } from "./static-report.mjs";
 import { verify_static_production_artifact } from "./verify-static-production-artifact.mjs";
+import { with_deployment_lock } from "./deployment-lock.mjs";
 
 export const STATIC_CONFIG_FILE = "static-report-config.json";
 
@@ -98,9 +99,16 @@ export function parse_build_static_arguments(arguments_) {
   throw new Error("Usage: npm run build:static -- [--run <run-id>]");
 }
 
+export async function run_build_static_command(options = {}) {
+  const deploymentRoot = resolve(options.deploymentRoot ?? resolve(import.meta.dirname, ".."));
+  const lock = options.withLock ?? with_deployment_lock;
+  const build = options.build ?? build_static;
+  return lock({ deploymentRoot, command: "build:static" }, () => build({ ...options, deploymentRoot }));
+}
+
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const result = await build_static(parse_build_static_arguments(process.argv.slice(2)));
+    const result = await run_build_static_command(parse_build_static_arguments(process.argv.slice(2)));
     console.log(`Static production built from direct report ${result.report.runId} (${result.report.status}) at ${result.artifact}.`);
   } catch (error) {
     console.error(`build:static: ${error instanceof Error ? error.message : String(error)}`);

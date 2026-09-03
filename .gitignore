@@ -8,3 +8,4 @@ dist/
 **/.wrangler/
 *.tsbuildinfo
 static-production/
+.deployment-lock/
