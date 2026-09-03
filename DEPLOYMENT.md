@@ -48,13 +48,59 @@ Cloudflare Pages project `hson-deploy`, and uploads those exact bytes to its
 `main` branch. It does not build, run tests, update submodules, or change a
 checkout. It does not create a Pages project or change custom domains.
 
-## Complete production deployment
+## Source synchronization workflows
 
-Set the existing production TOWL Worker origin and run the complete deployment:
+Never edit `hson-deploy` submodules directly. Make source changes and commits in
+the sibling owning `hson-live` or `hson-demo2` repository, then update the
+gitlink downstream.
+
+Synchronize the deployment checkout to the clean current owning HEADs without
+deploying or committing:
 
 ```sh
-HSON_TOWL_WORKER_WS_ORIGIN=wss://<existing-worker-origin> npm run deploy
+npm run subs:update
 ```
+
+This command requires the deployment lock to be free, rejects uncommitted
+tracked owning-source changes, moves only the nested checkouts, verifies their
+exact revisions and cleanliness, and leaves changed gitlinks visible for review
+and a deliberate commit. It performs no push or remote source selection.
+
+Two complete deployment workflows are intentionally distinct:
+
+```sh
+# Deterministic pinned deploy: redeploy this checkout's exact gitlinks.
+npm run deploy
+
+# Convenient current-source deploy: sync clean owning HEADs, make one local
+# gitlink-only commit when needed, then run the same complete deployment.
+npm run deploy:latest
+```
+
+`deploy:latest` rejects unrelated tracked `hson-deploy` changes. One outer lock
+covers synchronization, the optional `Update source gitlinks` commit, workspace
+verification, and provider deployment. It never commits source in a submodule
+and never pushes.
+
+## Complete production deployment
+
+The existing production TOWL Worker origin is tracked in
+`hson-demo2/deployment/towl-worker-target.json`, so the normal complete
+deployment requires no manual origin export:
+
+```sh
+npm run deploy
+```
+
+An explicit environment value overrides the tracked origin for deliberate
+alternate-target testing:
+
+```sh
+HSON_TOWL_WORKER_WS_ORIGIN=wss://alternate.example npm run deploy
+```
+
+The override remains subject to the existing Worker, embedded-static, and
+browser-origin agreement guards.
 
 The command performs one serial operation:
 
@@ -97,9 +143,8 @@ Product WebSockets remain available for TOWL and circuit behavior through
 application route. Never put bearer tokens or other credentials in a `VITE_*`
 variable.
 
-Never edit `hson-deploy` submodules directly. Make source changes in the owning
-repository and update the gitlink downstream. Source synchronization is an
-explicit repository-maintenance action and is never part of deployment.
+Source synchronization is never part of plain `deploy`; only the explicitly
+named `subs:update` and `deploy:latest` convenience commands may move gitlinks.
 
 ## Node production runtime
 
@@ -127,8 +172,9 @@ application, run product or hosted tests, run `npm ci` or `npm pack`, or invoke
 broad repository checks.
 
 Use Node `>=22.12.0 <25` and npm `>=10 <12`. Worker deployment requires a
-`CLOUDFLARE_API_TOKEN` or an authenticated Wrangler session, plus
-`HSON_TOWL_WORKER_WS_ORIGIN` identifying the existing production Worker origin.
+`CLOUDFLARE_API_TOKEN` or an authenticated Wrangler session. The tracked target
+provides `HSON_TOWL_WORKER_WS_ORIGIN` by default; an explicit environment value
+may override it subject to the same validation and agreement checks.
 
 There is no deployment `pack` operation and no certification, receipt, capture,
 or admission step. `build:static` is deployment-artifact construction. Ordinary

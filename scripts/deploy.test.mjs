@@ -91,13 +91,61 @@ test("static and Worker target agreement is exact and fail-closed", () => {
   assert.throws(() => verify_worker_static_target_agreement(staticPreflight, { ...target, productionStaticOrigins: ["https://other.example"] }), /does not admit/);
 });
 
+test("plain deploy uses the tracked production Worker origin without source synchronization", async () => {
+  const { order, options } = fixture({
+    deploymentRoot: root,
+    loadTarget: undefined,
+    environment: {},
+    buildStatic: async ({ environment }) => {
+      order.push("build static");
+      assert.equal(environment.VITE_LIVEHOST_WS_URL, "wss://hson-demo2-hosted-tests.hansonpw.workers.dev");
+      return "build";
+    },
+    preflightStatic: async () => {
+      order.push("preflight static");
+      return { ...staticPreflight, verification: { liveHostOrigin: "wss://hson-demo2-hosted-tests.hansonpw.workers.dev" } };
+    },
+  });
+  await execute_complete_deploy(options);
+  assert.equal(order.some((step) => /subs:update|source sync/i.test(step)), false);
+});
+
+test("explicit Worker-origin override remains subject to exact static target agreement", async () => {
+  const overridden = "wss://alternate.example";
+  const { options } = fixture({
+    deploymentRoot: root,
+    loadTarget: undefined,
+    environment: { HSON_TOWL_WORKER_WS_ORIGIN: overridden },
+    buildStatic: async ({ environment }) => {
+      assert.equal(environment.VITE_LIVEHOST_WS_URL, overridden);
+      return "build";
+    },
+    preflightStatic: async () => ({ ...staticPreflight, verification: { liveHostOrigin: overridden } }),
+  });
+  const result = await execute_complete_deploy(options);
+  assert.deepEqual(result.agreement, "agreement");
+
+  const mismatch = fixture({
+    deploymentRoot: root,
+    loadTarget: undefined,
+    environment: { HSON_TOWL_WORKER_WS_ORIGIN: overridden },
+    verifyAgreement: undefined,
+    preflightStatic: async () => staticPreflight,
+  });
+  await assert.rejects(execute_complete_deploy(mismatch.options), /target mismatch/);
+});
+
 test("public deployment scripts are narrow and cannot reach tests, pack, certification, or Git mutation", () => {
   const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
   const demoManifest = JSON.parse(readFileSync(resolve(root, "hson-demo2/package.json"), "utf8"));
   const liveManifest = JSON.parse(readFileSync(resolve(root, "hson-live/package.json"), "utf8"));
   assert.equal(manifest.scripts.deploy, "node scripts/deploy.mjs");
+  assert.equal(manifest.scripts["build:static"], "npm run verify:runtime && node scripts/build-static.mjs");
   assert.equal(manifest.scripts["deploy:static"], "node scripts/deploy-static.mjs");
   assert.equal(manifest.scripts["deploy:worker"], "node scripts/deploy-worker.mjs");
+  assert.equal(manifest.scripts["subs:update"], "node scripts/subs-update.mjs");
+  assert.equal(manifest.scripts["deploy:latest"], "node scripts/deploy-latest.mjs");
+  assert.doesNotMatch(readFileSync(resolve(import.meta.dirname, "deploy.mjs"), "utf8"), /subs-update|subs:update/);
   assert.equal(manifest.scripts.pack, undefined);
   assert.equal(manifest.scripts.certify, undefined);
   assert.equal(manifest.scripts["preflight:worker"], undefined);

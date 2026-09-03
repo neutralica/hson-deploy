@@ -8,6 +8,8 @@ import { DEPLOYMENT_LOCK_OWNER_FILE, acquire_deployment_lock } from "./deploymen
 import { run_static_deploy_command } from "./deploy-static.mjs";
 import { run_worker_deploy_command } from "./deploy-worker.mjs";
 import { run_complete_deploy_command } from "./deploy.mjs";
+import { run_latest_deploy_command } from "./deploy-latest.mjs";
+import { run_subs_update_command } from "./subs-update.mjs";
 
 test("lock records ownership and releases through explicit ownership", async () => {
   const deploymentRoot = await mkdtemp(join(tmpdir(), "hson-deployment-lock-"));
@@ -28,6 +30,8 @@ test("every public deployment command fails immediately while the checkout lock 
     () => run_static_deploy_command({ deploymentRoot, execute: async () => { touched += 1; } }),
     () => run_worker_deploy_command({ deploymentRoot, execute: async () => { touched += 1; } }),
     () => run_complete_deploy_command({ deploymentRoot, execute: async () => { touched += 1; } }),
+    () => run_subs_update_command({ deploymentRoot, synchronize: async () => { touched += 1; } }),
+    () => run_latest_deploy_command({ deploymentRoot, deploy: async () => { touched += 1; } }),
   ];
   try {
     for (const attempt of attempts) await assert.rejects(attempt(), /already held.*manually remove/s);
